@@ -23,5 +23,5 @@ Future<Uint8List> buildZipFromDirectory(String directoryPath) async {
     archive.addFile(ArchiveFile(relativePath, bytes.length, bytes));
   }
 
-  return Uint8List.fromList(ZipEncoder().encode(archive)!);
+  return Uint8List.fromList(ZipEncoder().encode(archive));
 }
