@@ -11,6 +11,7 @@ class ModelManifest:
     model_id: str
     method: str
     artifact_files: list[str] = field(default_factory=list)
+    compression_config: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
 
 

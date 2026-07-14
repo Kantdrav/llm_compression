@@ -7,6 +7,7 @@ import typer
 
 from .config import CompressionConfig, ExportConfig
 from .demo import run_demo
+from .inference import chat_loop
 from .pipeline import CompressionPipeline
 
 app = typer.Typer(add_completion=False, help="Compress LLMs and export edge-ready bundles.")
@@ -20,7 +21,7 @@ def compress(
     rank_ratio: float = typer.Option(0.5, help="Fraction of the maximum linear-layer rank to keep."),
     target_device: str = typer.Option("cpu", help="Target deployment device label."),
     heal_steps: int = typer.Option(0, help="Optional healing steps to run after compression."),
-    heal_learning_rate: float = typer.Option(1e-4, help="Learning rate for healing.") ,
+    heal_learning_rate: float = typer.Option(1e-4, help="Learning rate for healing."),
     calibration_batches: int = typer.Option(8, help="Number of synthetic calibration batches to use for healing."),
     calibration_batch_size: int = typer.Option(2, help="Synthetic calibration batch size."),
     calibration_sequence_length: int = typer.Option(16, help="Synthetic calibration sequence length."),
@@ -64,6 +65,17 @@ def demo(
             indent=2,
         )
     )
+
+
+@app.command()
+def chat(
+    bundle_dir: Path = typer.Option(..., help="Directory containing manifest.json and compressed_model.pt."),
+    device: str = typer.Option("cpu", help="Device to load the compressed model on."),
+    max_new_tokens: int = typer.Option(64, help="Maximum number of new tokens to generate per prompt."),
+    temperature: float = typer.Option(0.0, help="Sampling temperature. Use 0 for deterministic decoding."),
+) -> None:
+    chat_loop(bundle_dir=bundle_dir, device=device, max_new_tokens=max_new_tokens, temperature=temperature)
+
 
 def main() -> None:
     app()

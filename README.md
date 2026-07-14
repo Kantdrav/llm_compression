@@ -21,6 +21,17 @@ The paper you shared is about a tensor-network style compression method. Reprodu
 - Compression config and manifest tracking
 - Model export bundle generation
 - A low-rank compression path that is a good baseline for tensor-network experiments
+- Interactive querying of a compressed bundle from the CLI
+
+## What the compression report means
+
+The current pipeline does not compute task accuracy yet. It reports compression size metrics instead:
+
+- `original_parameters`
+- `compressed_parameters`
+- `parameter_ratio` = `compressed_parameters / original_parameters`
+
+Use `parameter_ratio` as the quick health check for how much smaller the model became. If you want true accuracy, add an evaluation set after compression, such as perplexity on a validation corpus or a downstream benchmark.
 
 ## Quick start
 
@@ -30,9 +41,24 @@ source .venv/bin/activate
 pip install -e .
 llm-edge-compression compress --model-id gpt2 --output-dir artifacts/gpt2-low-rank --method tensor_inspired
 llm-edge-compression demo --output-dir artifacts/demo
+llm-edge-compression chat --bundle-dir artifacts/gpt2-low-rank
 ```
 
 The `demo` command uses a tiny local model, so it is the easiest way to verify the bundle/export flow before you point the pipeline at a full LLM checkpoint.
+
+To ask queries of a compressed model, point `chat` at the bundle directory that contains `manifest.json` and `compressed_model.pt`. The CLI reloads the original Hugging Face model, rebuilds the compressed layers using the stored compression settings, loads the compressed weights, and then opens an interactive prompt.
+
+Example session:
+
+```bash
+llm-edge-compression chat --bundle-dir artifacts/gpt2-low-rank
+```
+
+Then type a prompt such as:
+
+```text
+Explain quantum compression in one paragraph.
+```
 
 ## Suggested next milestones
 

@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 
 from .compressors import DynamicQuantizationCompressor, TensorNetworkCompressor, count_parameters
-from .config import CompressionConfig, ExportConfig
+from .config import CompressionConfig, ExportConfig, compression_config_to_dict
 from .export import EdgeExporter
 from .healing import HealingConfig, heal_model
 from .manifest import ModelManifest, write_manifest
@@ -53,6 +53,7 @@ class CompressionPipeline:
 			model_id=self.compression.model_id,
 			method=self.compression.method,
 			artifact_files=export_result.artifact_files,
+			compression_config=compression_config_to_dict(self.compression),
 			metrics={
 				"original_parameters": original_parameters,
 				"compressed_parameters": compressed_parameters,

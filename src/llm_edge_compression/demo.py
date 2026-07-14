@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from .compressors import TensorNetworkCompressor, count_parameters
-from .config import ExportConfig
+from .config import CompressionConfig, ExportConfig, compression_config_to_dict
 from .export import EdgeExporter
 from .manifest import ModelManifest, write_manifest
 
@@ -50,6 +50,9 @@ def run_demo(output_dir: Path, rank_ratio: float = 0.5) -> DemoResult:
         model_id="demo/tiny-edge-llm",
         method="tensor_inspired",
         artifact_files=export_result.artifact_files,
+        compression_config=compression_config_to_dict(
+            CompressionConfig(model_id="demo/tiny-edge-llm", output_dir=output_dir, rank_ratio=rank_ratio)
+        ),
         metrics={
             "original_parameters": original_parameters,
             "compressed_parameters": compressed_parameters,
