@@ -20,6 +20,7 @@ class CompressionPolicy:
                 r"^model\.layers\.[01](?:\.|$)",
                 r"^transformer\.h\.[01](?:\.|$)",
                 r"^blocks\.[01](?:\.|$)",
+                r"(^|\.)lm_head(?:\.|$)",
             )
         )
 

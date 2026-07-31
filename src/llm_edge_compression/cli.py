@@ -73,8 +73,19 @@ def chat(
     device: str = typer.Option("cpu", help="Device to load the compressed model on."),
     max_new_tokens: int = typer.Option(64, help="Maximum number of new tokens to generate per prompt."),
     temperature: float = typer.Option(0.0, help="Sampling temperature. Use 0 for deterministic decoding."),
+    top_p: float = typer.Option(0.95, help="Nucleus sampling probability when temperature is above 0."),
+    top_k: int = typer.Option(50, help="Top-k sampling cutoff when temperature is above 0."),
+    repetition_penalty: float = typer.Option(1.1, help="Penalty applied to repeated tokens."),
 ) -> None:
-    chat_loop(bundle_dir=bundle_dir, device=device, max_new_tokens=max_new_tokens, temperature=temperature)
+    chat_loop(
+        bundle_dir=bundle_dir,
+        device=device,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=repetition_penalty,
+    )
 
 
 def main() -> None:

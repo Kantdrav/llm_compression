@@ -9,6 +9,11 @@ import re
 import torch
 from torch import nn
 
+try:
+    from transformers.pytorch_utils import Conv1D
+except ImportError:  # pragma: no cover - optional dependency shape varies by transformers version
+    Conv1D = None
+
 from .config import CompressionPolicy
 
 
@@ -44,6 +49,9 @@ class TensorNetworkCompressor(BaseCompressor):
             if isinstance(child, nn.Linear):
                 if self._should_compress(child_path):
                     setattr(module, child_name, TensorNetworkLinear.from_linear(child, self._rank_ratio_for(child_path)))
+            elif Conv1D is not None and isinstance(child, Conv1D):
+                if self._should_compress(child_path):
+                    setattr(module, child_name, TensorNetworkConv1D.from_conv1d(child, self._rank_ratio_for(child_path)))
             else:
                 self._compress_module(child, child_path)
 
@@ -253,6 +261,64 @@ class TensorNetworkLinear(nn.Module):
         right_core = (torch.sqrt(s[:rank]).unsqueeze(1) * vh[:rank, :]).reshape(rank, out_right, in_right)
 
         bias = layer.bias.detach().cpu() if layer.bias is not None else None
+        return cls(left_core=left_core, right_core=right_core, in_factors=in_factors, out_factors=out_factors, bias=bias)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        batch_shape = inputs.shape[:-1]
+        in_left, in_right = self.in_factors
+        out_left, out_right = self.out_factors
+
+        reshaped_inputs = inputs.reshape(*batch_shape, in_left, in_right)
+        right_projected = torch.einsum("...uv,rov->...uro", reshaped_inputs, self.right_core)
+        outputs = torch.einsum("...uro,bur->...bo", right_projected, self.left_core)
+        outputs = outputs.reshape(*batch_shape, out_left * out_right)
+
+        if self.bias is not None:
+            outputs = outputs + self.bias
+        return outputs
+
+
+class TensorNetworkConv1D(nn.Module):
+    def __init__(
+        self,
+        left_core: torch.Tensor,
+        right_core: torch.Tensor,
+        in_factors: Tuple[int, int],
+        out_factors: Tuple[int, int],
+        bias: torch.Tensor | None,
+    ) -> None:
+        super().__init__()
+        self.left_core = nn.Parameter(left_core)
+        self.right_core = nn.Parameter(right_core)
+        self.in_factors = in_factors
+        self.out_factors = out_factors
+        if bias is None:
+            self.bias = None
+        else:
+            self.bias = nn.Parameter(bias)
+
+    @classmethod
+    def from_conv1d(cls, layer: nn.Module, rank_ratio: float) -> "TensorNetworkConv1D":
+        weight = layer.weight.detach().cpu().t()
+        out_features, in_features = weight.shape
+        in_factors = _best_factor_pair(in_features)
+        out_factors = _best_factor_pair(out_features)
+
+        out_left, out_right = out_factors
+        in_left, in_right = in_factors
+
+        weight_tensor = weight.reshape(out_left, out_right, in_left, in_right)
+        matricized = weight_tensor.permute(0, 2, 1, 3).reshape(out_left * in_left, out_right * in_right)
+
+        u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
+        candidate_rank = max(1, int(len(s) * rank_ratio))
+        compression_budget = max(1, ((out_features * in_features) - 1) // max(out_left * in_left + out_right * in_right, 1))
+        rank = max(1, min(len(s), candidate_rank, compression_budget))
+
+        left_core = (u[:, :rank] * torch.sqrt(s[:rank])).reshape(out_left, in_left, rank)
+        right_core = (torch.sqrt(s[:rank]).unsqueeze(1) * vh[:rank, :]).reshape(rank, out_right, in_right)
+
+        bias = layer.bias.detach().cpu() if getattr(layer, "bias", None) is not None else None
         return cls(left_core=left_core, right_core=right_core, in_factors=in_factors, out_factors=out_factors, bias=bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:

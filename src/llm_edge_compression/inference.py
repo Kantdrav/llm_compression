@@ -28,6 +28,14 @@ def _build_compressor(compression: CompressionConfig):
     return TensorNetworkCompressor(rank_ratio=compression.rank_ratio, layer_policy=compression.layer_policy)
 
 
+def _decode_continuation(tokenizer: Any, prompt_input_ids: torch.Tensor, output_ids: torch.Tensor) -> str:
+    prompt_length = prompt_input_ids.shape[-1]
+    continuation_ids = output_ids[0][prompt_length:]
+    if continuation_ids.numel() == 0:
+        return ""
+    return tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
+
+
 def load_compressed_bundle(bundle_dir: Path, device: str = "cpu") -> LoadedCompressedModel:
     manifest = read_manifest(bundle_dir / "manifest.json")
     compression = compression_config_from_dict(manifest.compression_config or {"model_id": manifest.model_id, "output_dir": bundle_dir.as_posix()})
@@ -47,22 +55,35 @@ def generate_text(
     device: str = "cpu",
     max_new_tokens: int = 64,
     temperature: float = 0.0,
+    top_p: float = 0.95,
+    top_k: int = 50,
+    repetition_penalty: float = 1.1,
 ) -> str:
     loaded = load_compressed_bundle(bundle_dir, device=device)
     tokenizer = loaded.tokenizer
     model = loaded.model
 
+    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     inputs = tokenizer(prompt, return_tensors="pt")
     inputs = {key: value.to(device) for key, value in inputs.items()}
 
-    generation_kwargs: dict[str, Any] = {"max_new_tokens": max_new_tokens}
+    generation_kwargs: dict[str, Any] = {
+        "max_new_tokens": max_new_tokens,
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "repetition_penalty": repetition_penalty,
+    }
     if temperature > 0:
-        generation_kwargs.update({"do_sample": True, "temperature": temperature})
+        generation_kwargs.update({"do_sample": True, "temperature": temperature, "top_p": top_p, "top_k": top_k})
+    else:
+        generation_kwargs["do_sample"] = False
 
     with torch.no_grad():
         output_ids = model.generate(**inputs, **generation_kwargs)
 
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    return _decode_continuation(tokenizer, inputs["input_ids"], output_ids)
 
 
 def chat_loop(
@@ -70,10 +91,15 @@ def chat_loop(
     device: str = "cpu",
     max_new_tokens: int = 64,
     temperature: float = 0.0,
+    top_p: float = 0.95,
+    top_k: int = 50,
+    repetition_penalty: float = 1.1,
 ) -> None:
     loaded = load_compressed_bundle(bundle_dir, device=device)
     tokenizer = loaded.tokenizer
     model = loaded.model
+    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token = tokenizer.eos_token
     print(f"Loaded {loaded.manifest.model_id} from {bundle_dir}")
     print("Type a prompt and press Enter. Use /exit to quit.")
 
@@ -84,14 +110,23 @@ def chat_loop(
         if prompt in {"/exit", "/quit"}:
             break
 
-        inputs = tokenizer(prompt, return_tensors="pt")
+        chat_prompt = f"User: {prompt}\nAssistant:"
+        inputs = tokenizer(chat_prompt, return_tensors="pt")
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
-        generation_kwargs: dict[str, Any] = {"max_new_tokens": max_new_tokens}
+        generation_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "repetition_penalty": repetition_penalty,
+        }
         if temperature > 0:
-            generation_kwargs.update({"do_sample": True, "temperature": temperature})
+            generation_kwargs.update({"do_sample": True, "temperature": temperature, "top_p": top_p, "top_k": top_k})
+        else:
+            generation_kwargs["do_sample"] = False
 
         with torch.no_grad():
             output_ids = model.generate(**inputs, **generation_kwargs)
 
-        print(tokenizer.decode(output_ids[0], skip_special_tokens=True))
+        response = _decode_continuation(tokenizer, inputs["input_ids"], output_ids)
+        print(response if response else "(no new text generated)")
