@@ -22,6 +22,8 @@ The paper you shared is about a tensor-network style compression method. Reprodu
 - Model export bundle generation
 - A low-rank compression path that is a good baseline for tensor-network experiments
 - Interactive querying of a compressed bundle from the CLI
+- FastAPI endpoints for uploading a local model archive or downloading a Hugging Face model before compression
+- Flutter web UI for switching between local upload and internet model download flows
 
 ## What the compression report means
 
@@ -43,6 +45,10 @@ llm-edge-compression compress --model-id gpt2 --output-dir artifacts/gpt2-low-ra
 llm-edge-compression demo --output-dir artifacts/demo
 llm-edge-compression chat --bundle-dir artifacts/gpt2-low-rank
 ```
+
+To compress a remote Hugging Face model without uploading a ZIP, call the backend `POST /compress-remote` endpoint or use the Flutter web app's "Internet model" mode.
+
+If you deploy the Flutter web client separately, set `API_BASE_URL` at build time so the app points at your live backend.
 
 The `demo` command uses a tiny local model, so it is the easiest way to verify the bundle/export flow before you point the pipeline at a full LLM checkpoint.
 
@@ -66,3 +72,16 @@ Explain quantum compression in one paragraph.
 - Add evaluation on perplexity and downstream tasks
 - Add device-specific export targets such as ONNX Runtime, GGUF, or TensorRT-LLM
 - Add benchmarking scripts for Raspberry Pi, Jetson, and mobile-class CPU targets
+
+## Deployment
+
+The repository includes GitHub Actions workflows for two deployment targets:
+
+- `Deploy Backend to Render` triggers a Render deploy hook for the FastAPI server.
+- `Deploy Flutter Web` builds `flutter_app` and deploys the web bundle to Vercel.
+
+Required secrets:
+
+- `RENDER_DEPLOY_HOOK_URL`
+- `VERCEL_TOKEN`
+- `API_BASE_URL`

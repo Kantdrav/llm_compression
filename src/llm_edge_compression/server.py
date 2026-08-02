@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import shutil
 import tempfile
@@ -10,6 +11,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel
 import json
 
@@ -20,19 +22,50 @@ from .pipeline import CompressionPipeline
 
 app = FastAPI(title="LLM Edge Compression Server")
 
-# Allow web UI served from localhost (different port) to call this API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost:8081", "http://127.0.0.1:8081"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 class RunDemoRequest(BaseModel):
     output_dir: str = "artifacts/demo"
     rank_ratio: float = 0.5
+
+
+class CompressRemoteRequest(BaseModel):
+    model_id: str
+    revision: str | None = None
+    method: str = "tensor_inspired"
+    rank_ratio: float = 0.5
+    target_device: str = "cpu"
+    trust_remote_code: bool = False
+    heal_steps: int = 0
+    heal_learning_rate: float = 1e-4
+    calibration_batches: int = 8
+    calibration_batch_size: int = 2
+    calibration_sequence_length: int = 16
+    output_root: str = "artifacts/uploads"
+
+
+def _cors_origins() -> list[str]:
+    defaults = [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+    ]
+    configured = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
+    origins: list[str] = []
+    for origin in configured + defaults:
+        if origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+# Allow web UI served from localhost (different port) to call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _safe_slug(value: str) -> str:
@@ -40,6 +73,18 @@ def _safe_slug(value: str) -> str:
     while "--" in cleaned:
         cleaned = cleaned.replace("--", "-")
     return cleaned.strip("-") or "model"
+
+
+def _download_remote_model(work_dir: Path, model_id: str, revision: str | None = None) -> Path:
+    download_dir = work_dir / "downloaded-model"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=model_id,
+        revision=revision,
+        local_dir=download_dir,
+        local_dir_use_symlinks=False,
+    )
+    return download_dir
 
 
 def _extract_uploaded_archive(upload_dir: Path, upload: UploadFile) -> Path:
@@ -166,50 +211,47 @@ def api_run_demo(req: RunDemoRequest) -> dict[str, Any]:
     return {"manifest": str(res.manifest_path), "parameter_ratio": res.parameter_ratio}
 
 
-@app.post("/compress-upload")
-async def compress_upload(
-    model_archive: UploadFile = File(...),
-    model_id: str = Form("uploaded-model"),
-    method: str = Form("tensor_inspired"),
-    rank_ratio: float = Form(0.5),
-    target_device: str = Form("cpu"),
-    heal_steps: int = Form(0),
-    heal_learning_rate: float = Form(1e-4),
-    calibration_batches: int = Form(8),
-    calibration_batch_size: int = Form(2),
-    calibration_sequence_length: int = Form(16),
-    output_root: str = Form("artifacts/uploads"),
+def _compress_model_bundle(
+    source_model_dir: Path,
+    model_id: str,
+    method: str,
+    rank_ratio: float,
+    target_device: str,
+    heal_steps: int,
+    heal_learning_rate: float,
+    calibration_batches: int,
+    calibration_batch_size: int,
+    calibration_sequence_length: int,
+    output_root: str,
+    trust_remote_code: bool,
 ) -> dict[str, Any]:
     slug = _safe_slug(model_id)
     request_id = secrets.token_hex(4)
     output_dir = Path(output_root) / f"{slug}-{request_id}"
 
-    with tempfile.TemporaryDirectory(prefix="llm-edge-upload-") as temp_dir:
-        upload_dir = Path(temp_dir)
-        extracted_model_dir = _extract_uploaded_archive(upload_dir, model_archive)
-        compression = CompressionConfig(
-            model_id=extracted_model_dir.as_posix(),
-            output_dir=output_dir,
-            method=method,
-            rank_ratio=rank_ratio,
-            target_device=target_device,
-            heal_steps=heal_steps,
-            heal_learning_rate=heal_learning_rate,
-            calibration_batches=calibration_batches,
-            calibration_batch_size=calibration_batch_size,
-            calibration_sequence_length=calibration_sequence_length,
-        )
-        export = ExportConfig(output_dir=output_dir)
-        try:
-            result = CompressionPipeline(compression, export).run()
-        except ValueError as ve:
-            # Likely a malformed model config (e.g. missing model_type)
-            raise HTTPException(status_code=400, detail=str(ve))
-        except Exception as exc:
-            # For unexpected errors, return a 500 with the message for easier debugging
-            raise HTTPException(status_code=500, detail=str(exc))
-        result.manifest.model_id = model_id
-        write_manifest(result.manifest, result.manifest_path.parent)
+    compression = CompressionConfig(
+        model_id=source_model_dir.as_posix(),
+        output_dir=output_dir,
+        method=method,
+        rank_ratio=rank_ratio,
+        target_device=target_device,
+        trust_remote_code=trust_remote_code,
+        heal_steps=heal_steps,
+        heal_learning_rate=heal_learning_rate,
+        calibration_batches=calibration_batches,
+        calibration_batch_size=calibration_batch_size,
+        calibration_sequence_length=calibration_sequence_length,
+    )
+    export = ExportConfig(output_dir=output_dir)
+    try:
+        result = CompressionPipeline(compression, export).run()
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    result.manifest.model_id = model_id
+    write_manifest(result.manifest, result.manifest_path.parent)
 
     return {
         "manifest": result.manifest_path.as_posix(),
@@ -218,6 +260,61 @@ async def compress_upload(
         "metrics": result.manifest.metrics,
         "model_id": model_id,
     }
+
+
+@app.post("/compress-upload")
+async def compress_upload(
+    model_archive: UploadFile = File(...),
+    model_id: str = Form("uploaded-model"),
+    method: str = Form("tensor_inspired"),
+    rank_ratio: float = Form(0.5),
+    target_device: str = Form("cpu"),
+    trust_remote_code: bool = Form(False),
+    heal_steps: int = Form(0),
+    heal_learning_rate: float = Form(1e-4),
+    calibration_batches: int = Form(8),
+    calibration_batch_size: int = Form(2),
+    calibration_sequence_length: int = Form(16),
+    output_root: str = Form("artifacts/uploads"),
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="llm-edge-upload-") as temp_dir:
+        upload_dir = Path(temp_dir)
+        extracted_model_dir = _extract_uploaded_archive(upload_dir, model_archive)
+        return _compress_model_bundle(
+            extracted_model_dir,
+            model_id,
+            method,
+            rank_ratio,
+            target_device,
+            heal_steps,
+            heal_learning_rate,
+            calibration_batches,
+            calibration_batch_size,
+            calibration_sequence_length,
+            output_root,
+            trust_remote_code,
+        )
+
+
+@app.post("/compress-remote")
+def compress_remote(req: CompressRemoteRequest) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="llm-edge-remote-") as temp_dir:
+        work_dir = Path(temp_dir)
+        downloaded_model_dir = _download_remote_model(work_dir, req.model_id, req.revision)
+        return _compress_model_bundle(
+            downloaded_model_dir,
+            req.model_id,
+            req.method,
+            req.rank_ratio,
+            req.target_device,
+            req.heal_steps,
+            req.heal_learning_rate,
+            req.calibration_batches,
+            req.calibration_batch_size,
+            req.calibration_sequence_length,
+            req.output_root,
+            req.trust_remote_code,
+        )
 
 
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:

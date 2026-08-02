@@ -32,6 +32,7 @@ class CompressionConfig:
     method: CompressionMethod = "tensor_inspired"
     rank_ratio: float = 0.5
     target_device: str = "cpu"
+    trust_remote_code: bool = False
     quantization_backend: str = "fbgemm"
     layer_policy: CompressionPolicy = field(default_factory=CompressionPolicy.paper_default)
     heal_steps: int = 0
@@ -56,6 +57,7 @@ def compression_config_to_dict(config: CompressionConfig) -> dict[str, Any]:
         "method": config.method,
         "rank_ratio": config.rank_ratio,
         "target_device": config.target_device,
+        "trust_remote_code": config.trust_remote_code,
         "quantization_backend": config.quantization_backend,
         "layer_policy": {
             "skip_module_patterns": list(config.layer_policy.skip_module_patterns),
@@ -78,6 +80,7 @@ def compression_config_from_dict(data: dict[str, Any]) -> CompressionConfig:
         method=data.get("method", "tensor_inspired"),
         rank_ratio=float(data.get("rank_ratio", 0.5)),
         target_device=data.get("target_device", "cpu"),
+        trust_remote_code=bool(data.get("trust_remote_code", False)),
         quantization_backend=data.get("quantization_backend", "fbgemm"),
         layer_policy=CompressionPolicy(
             skip_module_patterns=tuple(layer_policy_data.get("skip_module_patterns", ())),

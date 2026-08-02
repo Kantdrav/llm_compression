@@ -12,9 +12,12 @@ This project uses GitHub Actions for continuous integration and delivery.
   - Builds Flutter web.
   - Builds an Android debug APK.
 
+- `Deploy Backend to Render`: runs on pushes to `main`.
+  - Triggers a Render deploy hook for the FastAPI backend.
+
 - `Deploy Flutter Web`: runs on pushes to `main`.
-  - Builds `flutter_app` for web.
-  - Deploys `flutter_app/build/web` to GitHub Pages.
+  - Builds `flutter_app` for web with `API_BASE_URL` injected at build time.
+  - Deploys `flutter_app/build/web` to Vercel.
 
 - `Release`: runs when you push a tag like `v1.0.0`.
   - Builds the Flutter web release zip.
@@ -24,9 +27,10 @@ This project uses GitHub Actions for continuous integration and delivery.
 ## First-Time GitHub Setup
 
 1. Push this repository to GitHub.
-2. In GitHub, open `Settings -> Pages`.
-3. Set the Pages source to `GitHub Actions`.
-4. Push to `main` and wait for the `Deploy Flutter Web` workflow.
+2. Create a Render service for the backend and copy its deploy hook URL into `RENDER_DEPLOY_HOOK_URL`.
+3. Create a Vercel project for the Flutter web app and store its token in `VERCEL_TOKEN`.
+4. Set `API_BASE_URL` to the deployed backend URL so the web app calls the live API.
+5. Push to `main` and wait for the deploy workflows.
 
 ## Creating A Release
 

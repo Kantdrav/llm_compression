@@ -6,6 +6,11 @@ import 'package:http/http.dart' as http;
 
 import 'archive_builder.dart';
 
+const String kApiBaseUrl = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: 'http://127.0.0.1:8000',
+);
+
 void main() {
   runApp(const MyApp());
 }
@@ -39,28 +44,42 @@ class CompressionHomePage extends StatefulWidget {
 }
 
 class _CompressionHomePageState extends State<CompressionHomePage> {
-  final TextEditingController _backendUrlController = TextEditingController(text: 'http://127.0.0.1:8000');
+  final TextEditingController _backendUrlController = TextEditingController(text: kApiBaseUrl);
   final TextEditingController _modelIdController = TextEditingController(text: 'local-model');
+  final TextEditingController _remoteModelIdController = TextEditingController(text: 'gpt2');
+  final TextEditingController _remoteRevisionController = TextEditingController();
 
   String? _selectedArchiveName;
   List<int>? _selectedArchiveBytes;
   String? _selectedDirectory;
   bool _isUploading = false;
+  bool _useRemoteModel = false;
+  bool _trustRemoteCode = false;
   String? _statusMessage;
   String? _errorMessage;
   Map<String, dynamic>? _result;
   String _method = 'tensor_inspired';
   double _rankRatio = 0.5;
   double _healSteps = 0;
+  String _remotePreset = 'gpt2';
 
   @override
   void dispose() {
     _backendUrlController.dispose();
     _modelIdController.dispose();
+    _remoteModelIdController.dispose();
+    _remoteRevisionController.dispose();
     super.dispose();
   }
 
   String _trimTrailingSlashes(String value) => value.trim().replaceAll(RegExp(r'/+$'), '');
+
+  void _setRemotePreset(String value) {
+    setState(() {
+      _remotePreset = value;
+      _remoteModelIdController.text = value;
+    });
+  }
 
   Future<void> _pickArchive() async {
     try {
@@ -139,16 +158,22 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
 
   Future<void> _compressModel() async {
     final backendUrl = _trimTrailingSlashes(_backendUrlController.text);
-    if (_selectedArchiveName == null && _selectedDirectory == null) {
+    if (backendUrl.isEmpty) {
       setState(() {
-        _errorMessage = 'Choose a zip archive or folder before compressing.';
+        _errorMessage = 'Enter a backend URL.';
         _statusMessage = null;
       });
       return;
     }
-    if (backendUrl.isEmpty) {
+
+    if (_useRemoteModel) {
+      await _compressRemoteModel(backendUrl);
+      return;
+    }
+
+    if (_selectedArchiveName == null && _selectedDirectory == null) {
       setState(() {
-        _errorMessage = 'Enter a backend URL.';
+        _errorMessage = 'Choose a zip archive or folder before compressing.';
         _statusMessage = null;
       });
       return;
@@ -170,6 +195,7 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
         'rank_ratio': _rankRatio.toStringAsFixed(2),
         'target_device': 'cpu',
         'heal_steps': _healSteps.round().toString(),
+        'trust_remote_code': _trustRemoteCode.toString(),
       });
       request.files.add(
         http.MultipartFile.fromBytes(
@@ -198,6 +224,72 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
       setState(() {
         _result = decoded;
         _statusMessage = 'Compression complete.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage = error.toString();
+        _statusMessage = null;
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _compressRemoteModel(String backendUrl) async {
+    final remoteModelId = _remoteModelIdController.text.trim();
+    if (remoteModelId.isEmpty) {
+      setState(() {
+        _errorMessage = 'Enter a Hugging Face model ID before compressing.';
+        _statusMessage = null;
+      });
+      return;
+    }
+
+    setState(() {
+      _isUploading = true;
+      _statusMessage = 'Downloading and compressing...';
+      _errorMessage = null;
+      _result = null;
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse('$backendUrl/compress-remote'),
+        headers: const {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'model_id': remoteModelId,
+          'revision': _remoteRevisionController.text.trim().isEmpty ? null : _remoteRevisionController.text.trim(),
+          'method': _method,
+          'rank_ratio': _rankRatio,
+          'target_device': 'cpu',
+          'trust_remote_code': _trustRemoteCode,
+          'heal_steps': _healSteps.round(),
+        }),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        setState(() {
+          _errorMessage = response.body.isEmpty ? 'Remote compression failed with HTTP ${response.statusCode}.' : response.body;
+          _statusMessage = null;
+        });
+        return;
+      }
+
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      setState(() {
+        _result = decoded;
+        _statusMessage = 'Remote compression complete.';
       });
     } catch (error) {
       if (!mounted) {
@@ -310,7 +402,7 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('Upload and compress', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700)),
+            Text('Compress a model', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700)),
             const SizedBox(height: 20),
             TextField(
               controller: _backendUrlController,
@@ -321,10 +413,31 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
               ),
             ),
             const SizedBox(height: 16),
+            ToggleButtons(
+              isSelected: [_useRemoteModel == false, _useRemoteModel],
+              onPressed: (index) {
+                setState(() {
+                  _useRemoteModel = index == 1;
+                });
+              },
+              borderRadius: BorderRadius.circular(14),
+              constraints: const BoxConstraints(minHeight: 44),
+              children: const [
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: Text('Local upload'),
+                ),
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: Text('Internet model'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
             TextField(
               controller: _modelIdController,
               decoration: const InputDecoration(
-                labelText: 'Model label',
+                labelText: 'Bundle label',
                 hintText: 'llama-demo or custom-upload',
                 border: OutlineInputBorder(),
               ),
@@ -350,6 +463,15 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
                 border: OutlineInputBorder(),
               ),
             ),
+            const SizedBox(height: 16),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: _trustRemoteCode,
+              onChanged: _isUploading ? null : (value) => setState(() => _trustRemoteCode = value ?? false),
+              title: const Text('Trust remote code'),
+              subtitle: const Text('Enable this for Hugging Face models that ship custom loading code.'),
+            ),
             const SizedBox(height: 18),
             Text('Rank ratio: ${_rankRatio.toStringAsFixed(2)}', style: theme.textTheme.titleMedium),
             Slider(
@@ -369,23 +491,69 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
               onChanged: (value) => setState(() => _healSteps = value),
             ),
             const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: _isUploading ? null : _pickArchive,
-              icon: const Icon(Icons.upload_file),
-              label: const Text('Choose model ZIP'),
-            ),
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              onPressed: _isUploading ? null : _pickDirectory,
-              icon: const Icon(Icons.folder_open),
-              label: const Text('Choose model folder'),
-            ),
-            const SizedBox(height: 12),
-            if (_selectedArchiveName != null) _InfoChip(label: 'Selected file', value: _selectedArchiveName!),
-            if (_selectedDirectory != null)
+            if (_useRemoteModel) ...[
+              DropdownButtonFormField<String>(
+                value: _remotePreset,
+                items: const [
+                  DropdownMenuItem(value: 'gpt2', child: Text('gpt2')),
+                  DropdownMenuItem(value: 'distilgpt2', child: Text('distilgpt2')),
+                  DropdownMenuItem(value: 'sshleifer/tiny-gpt2', child: Text('sshleifer/tiny-gpt2')),
+                  DropdownMenuItem(value: 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', child: Text('TinyLlama/TinyLlama-1.1B-Chat-v1.0')),
+                ],
+                onChanged: _isUploading
+                    ? null
+                    : (value) {
+                        if (value != null) {
+                          _setRemotePreset(value);
+                        }
+                      },
+                decoration: const InputDecoration(
+                  labelText: 'Popular model IDs',
+                  border: OutlineInputBorder(),
+                ),
+              ),
               const SizedBox(height: 12),
-            if (_selectedDirectory != null)
-              _InfoChip(label: 'Selected folder', value: _selectedDirectory!),
+              TextField(
+                controller: _remoteModelIdController,
+                decoration: const InputDecoration(
+                  labelText: 'Hugging Face model ID',
+                  hintText: 'meta-llama/Llama-3.2-1B-Instruct',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _remoteRevisionController,
+                decoration: const InputDecoration(
+                  labelText: 'Revision or tag',
+                  hintText: 'main, v1.0, or a commit hash',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'The backend will download the model from Hugging Face, compress it, and return a manifest path for the bundle.',
+                style: TextStyle(color: Colors.white70),
+              ),
+            ] else ...[
+              OutlinedButton.icon(
+                onPressed: _isUploading ? null : _pickArchive,
+                icon: const Icon(Icons.upload_file),
+                label: const Text('Choose model ZIP'),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: _isUploading ? null : _pickDirectory,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Choose model folder'),
+              ),
+              const SizedBox(height: 12),
+              if (_selectedArchiveName != null) _InfoChip(label: 'Selected file', value: _selectedArchiveName!),
+              if (_selectedDirectory != null)
+                const SizedBox(height: 12),
+              if (_selectedDirectory != null)
+                _InfoChip(label: 'Selected folder', value: _selectedDirectory!),
+            ],
             const SizedBox(height: 20),
             FilledButton.icon(
               onPressed: _isUploading ? null : _compressModel,
@@ -406,7 +574,7 @@ class _CompressionHomePageState extends State<CompressionHomePage> {
               Text(_errorMessage!, style: theme.textTheme.bodyMedium?.copyWith(color: Colors.redAccent)),
             const SizedBox(height: 8),
             const Text(
-              'The backend expects a ZIP archive containing a Hugging Face model directory with config.json and weights.',
+              'Local mode expects a ZIP archive or folder containing a Hugging Face model directory with config.json and weights.',
               style: TextStyle(color: Colors.white70),
             ),
           ],

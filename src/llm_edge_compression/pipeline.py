@@ -27,7 +27,11 @@ class CompressionPipeline:
 		self.export = export or ExportConfig(output_dir=compression.output_dir)
 
 	def run(self) -> CompressionRunResult:
-		model = AutoModelForCausalLM.from_pretrained(self.compression.model_id, low_cpu_mem_usage=True)
+		model = AutoModelForCausalLM.from_pretrained(
+			self.compression.model_id,
+			low_cpu_mem_usage=True,
+			trust_remote_code=self.compression.trust_remote_code,
+		)
 		original_parameters = count_parameters(model)
 
 		compressor = self._build_compressor()
@@ -74,7 +78,11 @@ class CompressionPipeline:
 		return TensorNetworkCompressor(rank_ratio=self.compression.rank_ratio, layer_policy=self.compression.layer_policy)
 
 	def _build_calibration_batches(self, model: torch.nn.Module):
-		tokenizer = AutoTokenizer.from_pretrained(self.compression.model_id, use_fast=True)
+		tokenizer = AutoTokenizer.from_pretrained(
+			self.compression.model_id,
+			use_fast=True,
+			trust_remote_code=self.compression.trust_remote_code,
+		)
 		vocab_size = getattr(tokenizer, "vocab_size", None) or getattr(getattr(model, "config", None), "vocab_size", 32000)
 		for _ in range(self.compression.calibration_batches):
 			yield {

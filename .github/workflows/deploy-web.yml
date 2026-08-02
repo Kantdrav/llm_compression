@@ -7,16 +7,10 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build web app
+  deploy:
+    name: Build and deploy web app
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -36,21 +30,13 @@ jobs:
         run: flutter pub get
 
       - name: Build web
-        run: flutter build web --release
+        run: flutter build web --release --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: flutter_app/build/web
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
 
-  deploy:
-    name: Deploy to GitHub Pages
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Deploy to Vercel
+        run: vercel deploy ./build/web --prod --yes --token ${{ secrets.VERCEL_TOKEN }} --name model-compressor-web

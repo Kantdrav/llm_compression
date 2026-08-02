@@ -39,8 +39,16 @@ def _decode_continuation(tokenizer: Any, prompt_input_ids: torch.Tensor, output_
 def load_compressed_bundle(bundle_dir: Path, device: str = "cpu") -> LoadedCompressedModel:
     manifest = read_manifest(bundle_dir / "manifest.json")
     compression = compression_config_from_dict(manifest.compression_config or {"model_id": manifest.model_id, "output_dir": bundle_dir.as_posix()})
-    tokenizer = AutoTokenizer.from_pretrained(manifest.model_id, use_fast=True)
-    model = AutoModelForCausalLM.from_pretrained(manifest.model_id, low_cpu_mem_usage=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        manifest.model_id,
+        use_fast=True,
+        trust_remote_code=compression.trust_remote_code,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        manifest.model_id,
+        low_cpu_mem_usage=True,
+        trust_remote_code=compression.trust_remote_code,
+    )
     model = _build_compressor(compression).compress(model)
 
     state_dict = torch.load(bundle_dir / "compressed_model.pt", map_location="cpu")
