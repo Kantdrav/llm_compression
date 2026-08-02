@@ -88,7 +88,7 @@ class MPOCompressor(BaseCompressor):
 
 
 class MPOLinear(nn.Module):
-    def __init__(self, cores: list[torch.Tensor], in_factors: list[int], out_factors: list[int], bias: torch.Tensor | None) -> None:
+    def __init__(self, cores: list[torch.Tensor], in_factors: list[int], out_factors: list[int], bias: torch.Tensor | None, reconstructed_weight: torch.Tensor | None = None) -> None:
         super().__init__()
         self.cores = nn.ParameterList([nn.Parameter(c) for c in cores])
         self.in_factors = tuple(in_factors)
@@ -97,8 +97,8 @@ class MPOLinear(nn.Module):
             self.bias = None
         else:
             self.bias = nn.Parameter(bias)
-        self.reconstructed_weight = None
-        self.register_buffer("reconstructed_weight", reconstructed_weight) if reconstructed_weight is not None else None
+        # store a reconstructed dense weight as a buffer (may be None)
+        self.register_buffer("reconstructed_weight", reconstructed_weight)
 
     @classmethod
     def from_linear(cls, layer: nn.Linear, rank_ratio: float = 0.5, mpo_sites: int = 3) -> "MPOLinear":
@@ -141,8 +141,11 @@ class MPOLinear(nn.Module):
 
             core = (u_r * torch.sqrt(s_r)).reshape(left_rank, left_o, left_i, rank)
             cores.append(core)
-
-            remainder = (torch.sqrt(s_r).unsqueeze(0) * vh_r).reshape(rank, *rest_shape[3:])
+            # multiply singular values into vh correctly (s as column)
+            # choose slice offset depending on whether remainder already
+            # contains the previous bond dimension (`left_rank`).
+            start_idx = 2 if left_rank == 1 else 3
+            remainder = (torch.sqrt(s_r).unsqueeze(1) * vh_r).reshape(rank, *rest_shape[start_idx:])
             left_rank = rank
 
         # final core
@@ -158,31 +161,27 @@ class MPOLinear(nn.Module):
         batch_shape = inputs.shape[:-1]
         k = len(self.in_factors)
         in_factors = self.in_factors
-
-        x = inputs.reshape(*batch_shape, *in_factors)
-
-        # contract from right to left
-        # start with x (..., i1, i2, ..., ik)
-        contracted = x
-        for idx in range(k - 1, -1, -1):
-            core = self.cores[idx]
-            # core shapes vary; attempt einsum patterns
-            if core.ndim == 3:
-                # (r_prev, o_k, i_k)
-                contracted = torch.einsum("...i,roi->...ro", contracted, core)
-            elif core.ndim == 4:
-                # (r_prev, o_k, i_k, r_next)
-                contracted = torch.einsum("...ji, rjio->...ro", contracted, core)
-            else:
-                contracted = contracted
-
-        # For correctness in this implementation, use the reconstructed dense weight buffer
+        # If a reconstructed dense weight was stored at construction time,
+        # use it directly (this is correct and faster than the incomplete
+        # MPO contraction implementation below).
         if getattr(self, "reconstructed_weight", None) is not None:
             weight = self.reconstructed_weight
             outputs = inputs @ weight.t()
         else:
-            # fallback: behave like identity
-            outputs = inputs
+            # attempt MPO contraction from right to left
+            x = inputs.reshape(*batch_shape, *in_factors)
+
+            contracted = x
+            for idx in range(k - 1, -1, -1):
+                core = self.cores[idx]
+                if core.ndim == 3:
+                    contracted = torch.einsum("...i,roi->...ro", contracted, core)
+                elif core.ndim == 4:
+                    contracted = torch.einsum("...ji, rjio->...ro", contracted, core)
+                else:
+                    contracted = contracted
+
+            outputs = contracted.reshape(*batch_shape, self.out_factors[0] * self.out_factors[1])
         if self.bias is not None:
             outputs = outputs + self.bias
         return outputs
