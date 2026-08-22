@@ -8,6 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 
+from .adaptive_mpo import AdaptiveMPOCompressor
 from .compressors import DynamicQuantizationCompressor, TensorNetworkCompressor, count_parameters
 from .config import CompressionConfig, ExportConfig, compression_config_to_dict
 from .export import EdgeExporter
@@ -76,6 +77,10 @@ class CompressionPipeline:
 
         print("\n=== Compression Report ===")
         print(f"Method:                 {self.compression.method}")
+        print(f"Rank selection:         {'adaptive' if self.compression.adaptive_rank else 'fixed'}")
+        if self.compression.adaptive_rank:
+            print(f"Target reduction:       {self.compression.target_reduction * 100:.2f}%")
+            print(f"Energy threshold:       {self.compression.adaptive_energy_threshold:.6f}")
         print(f"Model:                  {self.compression.model_id}")
         print(f"Original parameters:    {original_parameters:,}")
         print(f"Compressed parameters:  {compressed_parameters:,}")
@@ -110,6 +115,13 @@ class CompressionPipeline:
         if self.compression.method == "quantize":
             return DynamicQuantizationCompressor(backend=self.compression.quantization_backend)
         if self.compression.method == "mpo":
+            if self.compression.adaptive_rank:
+                return AdaptiveMPOCompressor(
+                    rank_ratio=self.compression.rank_ratio,
+                    layer_policy=self.compression.layer_policy,
+                    energy_threshold=self.compression.adaptive_energy_threshold,
+                    target_reduction=self.compression.target_reduction,
+                )
             from .compressors import MPOCompressor
             return MPOCompressor(rank_ratio=self.compression.rank_ratio, layer_policy=self.compression.layer_policy)
         return TensorNetworkCompressor(rank_ratio=self.compression.rank_ratio, layer_policy=self.compression.layer_policy)
