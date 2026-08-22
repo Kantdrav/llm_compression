@@ -62,33 +62,48 @@ class TensorNetworkCompressor(BaseCompressor):
         return self.layer_policy.layer_rank_overrides.get(module_path, self.rank_ratio)
 
 
-
 class LowRankCompressor(TensorNetworkCompressor):
     pass
 
 
 @dataclass(slots=True)
 class MPOCompressor(BaseCompressor):
-    """Scaffold for a Matrix Product Operator compressor.
-
-    Currently delegates to the TensorNetworkCompressor as a baseline and
-    provides a named entrypoint for wiring into the pipeline. The full
-    MPO decomposition will replace this delegation.
-    """
+    """Compress Linear layers with a truncated matrix-product operator (MPO)."""
     rank_ratio: float = 0.5
     layer_policy: CompressionPolicy = field(default_factory=CompressionPolicy)
 
     def compress(self, model: nn.Module) -> nn.Module:
-        for name, child in list(model.named_children()):
-            if isinstance(child, nn.Linear):
-                setattr(model, name, MPOLinear.from_linear(child, self.rank_ratio, mpo_sites=3))
-            else:
-                self.compress(child)
+        self._compress_module(model)
         return model
+
+    def _compress_module(self, module: nn.Module, module_path: str = "") -> None:
+        for child_name, child in list(module.named_children()):
+            child_path = f"{module_path}.{child_name}" if module_path else child_name
+            if isinstance(child, nn.Linear):
+                if self._should_compress(child_path):
+                    setattr(
+                        module,
+                        child_name,
+                        MPOLinear.from_linear(child, self._rank_ratio_for(child_path), mpo_sites=3),
+                    )
+            else:
+                self._compress_module(child, child_path)
+
+    def _should_compress(self, module_path: str) -> bool:
+        return not any(re.search(pattern, module_path) for pattern in self.layer_policy.skip_module_patterns)
+
+    def _rank_ratio_for(self, module_path: str) -> float:
+        return self.layer_policy.layer_rank_overrides.get(module_path, self.rank_ratio)
 
 
 class MPOLinear(nn.Module):
-    def __init__(self, cores: list[torch.Tensor], in_factors: list[int], out_factors: list[int], bias: torch.Tensor | None, reconstructed_weight: torch.Tensor | None = None) -> None:
+    def __init__(
+        self,
+        cores: list[torch.Tensor],
+        in_factors: list[int],
+        out_factors: list[int],
+        bias: torch.Tensor | None,
+    ) -> None:
         super().__init__()
         self.cores = nn.ParameterList([nn.Parameter(c) for c in cores])
         self.in_factors = tuple(in_factors)
@@ -97,38 +112,37 @@ class MPOLinear(nn.Module):
             self.bias = None
         else:
             self.bias = nn.Parameter(bias)
-        # store a reconstructed dense weight as a buffer (may be None)
-        self.register_buffer("reconstructed_weight", reconstructed_weight)
 
     @classmethod
     def from_linear(cls, layer: nn.Linear, rank_ratio: float = 0.5, mpo_sites: int = 3) -> "MPOLinear":
+        if mpo_sites < 2:
+            raise ValueError("mpo_sites must be at least 2")
+        if not 0 < rank_ratio <= 1:
+            raise ValueError("rank_ratio must be in (0, 1]")
+
         weight = layer.weight.detach().cpu()
         out_features, in_features = weight.shape
 
         out_factors = _partition_factors(out_features, mpo_sites)
         in_factors = _partition_factors(in_features, mpo_sites)
 
-        # reshape and interleave: o1,i1,o2,i2,...
+        # Reshape and interleave: o1, i1, o2, i2, ...
         tensor = weight.reshape(*out_factors, *in_factors)
         perm = []
-        k = mpo_sites
-        for i in range(k):
-            perm.append(i)
-            perm.append(k + i)
+        for i in range(mpo_sites):
+            perm.extend((i, mpo_sites + i))
         tensor = tensor.permute(*perm)
 
-        # iterative SVD to extract MPO cores
         cores: list[torch.Tensor] = []
         remainder = tensor
         left_rank = 1
-        for site in range(k - 1):
-            left_o = out_factors[site]
-            left_i = in_factors[site]
 
+        for site in range(mpo_sites - 1):
+            out_dim = out_factors[site]
+            in_dim = in_factors[site]
             rest_shape = remainder.shape
-            rows = left_rank * left_o * left_i
-            cols = int(torch.tensor(rest_shape).prod().item() // (left_rank * left_o * left_i))
 
+            rows = left_rank * out_dim * in_dim
             matricized = remainder.reshape(rows, -1)
             u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
 
@@ -139,52 +153,80 @@ class MPOLinear(nn.Module):
             s_r = s[:rank]
             vh_r = vh[:rank, :]
 
-            core = (u_r * torch.sqrt(s_r)).reshape(left_rank, left_o, left_i, rank)
+            core = (u_r * torch.sqrt(s_r)).reshape(left_rank, out_dim, in_dim, rank)
             cores.append(core)
-            # multiply singular values into vh correctly (s as column)
-            # choose slice offset depending on whether remainder already
-            # contains the previous bond dimension (`left_rank`).
-            start_idx = 2 if left_rank == 1 else 3
-            remainder = (torch.sqrt(s_r).unsqueeze(1) * vh_r).reshape(rank, *rest_shape[start_idx:])
+
+            # Before the first split, remainder has no leading bond dimension.
+            # After that, axis 0 is always the previous bond dimension, even
+            # when its numerical size happens to be 1.
+            remainder_start = 2 if site == 0 else 3
+            remainder = (torch.sqrt(s_r).unsqueeze(1) * vh_r).reshape(
+                rank, *rest_shape[remainder_start:]
+            )
             left_rank = rank
 
-        # final core
-        final_shape = remainder.shape
-        final_core = remainder.reshape(left_rank, *final_shape[1:])
-        cores.append(final_core)
+        # Final core has shape (left_rank, out_k, in_k).
+        cores.append(remainder.reshape(left_rank, out_factors[-1], in_factors[-1]))
 
         bias = layer.bias.detach().cpu() if layer.bias is not None else None
-        reconstructed = weight
-        return cls(cores=[torch.tensor(c) for c in cores], in_factors=in_factors, out_factors=out_factors, bias=bias, reconstructed_weight=reconstructed)
+        return cls(cores=[c.contiguous() for c in cores], in_factors=in_factors, out_factors=out_factors, bias=bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.shape[-1] != _product(self.in_factors):
+            raise ValueError(
+                f"Expected input feature size {_product(self.in_factors)}, got {inputs.shape[-1]}"
+            )
+
         batch_shape = inputs.shape[:-1]
+        x = inputs.reshape(*batch_shape, *self.in_factors)
         k = len(self.in_factors)
-        in_factors = self.in_factors
-        # If a reconstructed dense weight was stored at construction time,
-        # use it directly (this is correct and faster than the incomplete
-        # MPO contraction implementation below).
-        if getattr(self, "reconstructed_weight", None) is not None:
-            weight = self.reconstructed_weight
-            outputs = inputs @ weight.t()
-        else:
-            # attempt MPO contraction from right to left
-            x = inputs.reshape(*batch_shape, *in_factors)
 
-            contracted = x
-            for idx in range(k - 1, -1, -1):
-                core = self.cores[idx]
-                if core.ndim == 3:
-                    contracted = torch.einsum("...i,roi->...ro", contracted, core)
-                elif core.ndim == 4:
-                    contracted = torch.einsum("...ji, rjio->...ro", contracted, core)
-                else:
-                    contracted = contracted
+        # Contract the final input factor with the final core first. The
+        # intermediate layout is: batch, remaining input factors, bond, outputs.
+        contracted = torch.einsum("...i,roi->...ro", x, self.cores[-1])
+        batch_dims = len(batch_shape)
 
-            outputs = contracted.reshape(*batch_shape, self.out_factors[0] * self.out_factors[1])
+        # Contract each remaining input factor and MPO bond from right to left.
+        # tensordot keeps this implementation independent of the number of sites.
+        for site in range(k - 2, -1, -1):
+            input_axis = batch_dims + site
+            bond_axis = input_axis + 1
+            core = self.cores[site]
+
+            contracted = torch.tensordot(
+                contracted,
+                core,
+                dims=([input_axis, bond_axis], [2, 3]),
+            )
+
+            # tensordot returns: batch, earlier-inputs, existing-outputs,
+            # previous-bond, current-output. Move the new bond before outputs.
+            prefix_len = batch_dims + site
+            total_dims = contracted.ndim
+            previous_bond_axis = total_dims - 2
+            current_output_axis = total_dims - 1
+            contracted = contracted.permute(
+                *range(prefix_len),
+                previous_bond_axis,
+                *range(prefix_len, previous_bond_axis),
+                current_output_axis,
+            )
+
+        # The left boundary bond is size 1. The remaining dimensions are all
+        # output factors in left-to-right order.
+        contracted = contracted.squeeze(batch_dims)
+        outputs = contracted.reshape(*batch_shape, _product(self.out_factors))
+
         if self.bias is not None:
             outputs = outputs + self.bias
         return outputs
+
+
+def _product(values: Iterable[int]) -> int:
+    result = 1
+    for value in values:
+        result *= value
+    return result
 
 
 def _partition_factors(size: int, parts: int) -> list[int]:
@@ -202,19 +244,12 @@ def _partition_factors(size: int, parts: int) -> list[int]:
         return pf
 
     primes = prime_factors(size)
-    # start with ones
     factors = [1] * parts
-    # multiply smallest factor by next prime to keep them balanced
     for p in sorted(primes, reverse=False):
-        # find index of smallest factor
         idx = min(range(parts), key=lambda i: factors[i])
         factors[idx] *= p
-    # if any leftover (shouldn't be), adjust first factor
-    prod = 1
-    for f in factors:
-        prod *= f
+    prod = _product(factors)
     if prod != size:
-        # adjust last factor to make exact
         factors[-1] = factors[-1] * (size // prod)
     return factors
 
