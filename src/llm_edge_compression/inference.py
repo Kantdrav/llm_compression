@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
+from .paper_mpo import ResearchMPOCompressor
 from .adaptive_mpo import AdaptiveMPOCompressor
 from .compressors import DynamicQuantizationCompressor, MPOCompressor, TensorNetworkCompressor
 from .config import CompressionConfig, compression_config_from_dict
@@ -23,7 +23,17 @@ class LoadedCompressedModel:
 
 def _build_compressor(compression: CompressionConfig):
     if compression.method == "quantize":
-        return DynamicQuantizationCompressor(backend=compression.quantization_backend)
+        return DynamicQuantizationCompressor(
+            backend=compression.quantization_backend
+        )
+
+    if compression.method == "paper_mpo":
+        return ResearchMPOCompressor(
+            bond_dim=compression.bond_dim,
+            mpo_sites=compression.mpo_sites,
+            layer_policy=compression.layer_policy,
+        )
+
     if compression.method == "mpo":
         if compression.adaptive_rank:
             return AdaptiveMPOCompressor(
@@ -32,9 +42,16 @@ def _build_compressor(compression: CompressionConfig):
                 energy_threshold=compression.adaptive_energy_threshold,
                 target_reduction=compression.target_reduction,
             )
-        return MPOCompressor(rank_ratio=compression.rank_ratio, layer_policy=compression.layer_policy)
-    return TensorNetworkCompressor(rank_ratio=compression.rank_ratio, layer_policy=compression.layer_policy)
 
+        return MPOCompressor(
+            rank_ratio=compression.rank_ratio,
+            layer_policy=compression.layer_policy,
+        )
+
+    return TensorNetworkCompressor(
+        rank_ratio=compression.rank_ratio,
+        layer_policy=compression.layer_policy,
+    )
 
 def _decode_continuation(tokenizer: Any, prompt_input_ids: torch.Tensor, output_ids: torch.Tensor) -> str:
     prompt_length = prompt_input_ids.shape[-1]
