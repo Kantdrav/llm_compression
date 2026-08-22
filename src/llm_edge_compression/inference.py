@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from .adaptive_mpo import AdaptiveMPOCompressor
 from .compressors import DynamicQuantizationCompressor, MPOCompressor, TensorNetworkCompressor
 from .config import CompressionConfig, compression_config_from_dict
 from .manifest import ModelManifest, read_manifest
@@ -24,6 +25,13 @@ def _build_compressor(compression: CompressionConfig):
     if compression.method == "quantize":
         return DynamicQuantizationCompressor(backend=compression.quantization_backend)
     if compression.method == "mpo":
+        if compression.adaptive_rank:
+            return AdaptiveMPOCompressor(
+                rank_ratio=compression.rank_ratio,
+                layer_policy=compression.layer_policy,
+                energy_threshold=compression.adaptive_energy_threshold,
+                target_reduction=compression.target_reduction,
+            )
         return MPOCompressor(rank_ratio=compression.rank_ratio, layer_policy=compression.layer_policy)
     return TensorNetworkCompressor(rank_ratio=compression.rank_ratio, layer_policy=compression.layer_policy)
 
