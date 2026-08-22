@@ -32,6 +32,7 @@ def test_mpo_compressor_reduces_parameters() -> None:
 
     assert compressed_parameters < baseline
     assert output.shape == (2, 8)
+    assert all(not hasattr(module, "reconstructed_weight") for module in compressed.modules() if isinstance(module, MPOLinear))
 
 
 def test_mpo_full_rank_preserves_output_closely() -> None:
@@ -47,3 +48,15 @@ def test_mpo_full_rank_preserves_output_closely() -> None:
 
     assert any(isinstance(module, MPOLinear) for module in compressed.modules())
     assert torch.allclose(actual, expected, atol=1e-4, rtol=1e-4)
+
+
+def test_mpo_intermediate_rank_one_does_not_break_shapes() -> None:
+    torch.manual_seed(1)
+    layer = nn.Linear(64, 64).eval()
+    compressed = MPOLinear.from_linear(layer, rank_ratio=0.01, mpo_sites=3).eval()
+
+    sample = torch.randn(3, 64)
+    output = compressed(sample)
+
+    assert output.shape == (3, 64)
+    assert all(core.shape[0] >= 1 and core.shape[-1] >= 1 for core in compressed.cores)
