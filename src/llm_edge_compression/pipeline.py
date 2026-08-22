@@ -14,6 +14,7 @@ from .config import CompressionConfig, ExportConfig, compression_config_to_dict
 from .export import EdgeExporter
 from .healing import HealingConfig, heal_model
 from .manifest import ModelManifest, write_manifest
+from .paper_mpo import ResearchMPOCompressor
 
 
 @dataclass(slots=True)
@@ -24,7 +25,6 @@ class CompressionRunResult:
 
 
 def _state_dict_size_bytes(model: torch.nn.Module) -> int:
-    """Return the serialized size of a model state_dict in memory."""
     buffer = BytesIO()
     torch.save(model.state_dict(), buffer)
     return buffer.tell()
@@ -77,10 +77,14 @@ class CompressionPipeline:
 
         print("\n=== Compression Report ===")
         print(f"Method:                 {self.compression.method}")
-        print(f"Rank selection:         {'adaptive' if self.compression.adaptive_rank else 'fixed'}")
-        if self.compression.adaptive_rank:
-            print(f"Target reduction:       {self.compression.target_reduction * 100:.2f}%")
-            print(f"Energy threshold:       {self.compression.adaptive_energy_threshold:.6f}")
+        if self.compression.method == "paper_mpo":
+            print(f"Bond dimension (chi):   {self.compression.bond_dim}")
+            print(f"MPO sites:              {self.compression.mpo_sites}")
+        else:
+            print(f"Rank selection:         {'adaptive' if self.compression.adaptive_rank else 'fixed'}")
+            if self.compression.adaptive_rank:
+                print(f"Target reduction:       {self.compression.target_reduction * 100:.2f}%")
+                print(f"Energy threshold:       {self.compression.adaptive_energy_threshold:.6f}")
         print(f"Model:                  {self.compression.model_id}")
         print(f"Original parameters:    {original_parameters:,}")
         print(f"Compressed parameters:  {compressed_parameters:,}")
@@ -124,6 +128,12 @@ class CompressionPipeline:
                 )
             from .compressors import MPOCompressor
             return MPOCompressor(rank_ratio=self.compression.rank_ratio, layer_policy=self.compression.layer_policy)
+        if self.compression.method == "paper_mpo":
+            return ResearchMPOCompressor(
+                bond_dim=self.compression.bond_dim,
+                mpo_sites=self.compression.mpo_sites,
+                layer_policy=self.compression.layer_policy,
+            )
         return TensorNetworkCompressor(rank_ratio=self.compression.rank_ratio, layer_policy=self.compression.layer_policy)
 
     def _build_calibration_batches(self, model: torch.nn.Module):
