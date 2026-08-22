@@ -68,7 +68,7 @@ class LowRankCompressor(TensorNetworkCompressor):
 
 @dataclass(slots=True)
 class MPOCompressor(BaseCompressor):
-    """Compress Linear layers with a truncated matrix-product operator (MPO)."""
+    """Compress Linear and GPT-2 Conv1D layers with a truncated MPO."""
     rank_ratio: float = 0.5
     layer_policy: CompressionPolicy = field(default_factory=CompressionPolicy)
 
@@ -82,6 +82,9 @@ class MPOCompressor(BaseCompressor):
             if isinstance(child, nn.Linear):
                 if self._should_compress(child_path):
                     setattr(module, child_name, MPOLinear.from_linear(child, self._rank_ratio_for(child_path), mpo_sites=3))
+            elif Conv1D is not None and isinstance(child, Conv1D):
+                if self._should_compress(child_path):
+                    setattr(module, child_name, MPOLinear.from_conv1d(child, self._rank_ratio_for(child_path), mpo_sites=3))
             else:
                 self._compress_module(child, child_path)
 
@@ -111,12 +114,28 @@ class MPOLinear(nn.Module):
 
     @classmethod
     def from_linear(cls, layer: nn.Linear, rank_ratio: float = 0.5, mpo_sites: int = 3) -> "MPOLinear":
+        return cls._from_weight(layer.weight.detach().cpu(), layer.bias, rank_ratio, mpo_sites)
+
+    @classmethod
+    def from_conv1d(cls, layer: nn.Module, rank_ratio: float = 0.5, mpo_sites: int = 3) -> "MPOLinear":
+        # GPT-2 Conv1D stores weights as [in_features, out_features],
+        # whereas MPOLinear uses the standard [out_features, in_features] layout.
+        weight = layer.weight.detach().cpu().t()
+        return cls._from_weight(weight, getattr(layer, "bias", None), rank_ratio, mpo_sites)
+
+    @classmethod
+    def _from_weight(
+        cls,
+        weight: torch.Tensor,
+        bias_parameter: torch.Tensor | nn.Parameter | None,
+        rank_ratio: float,
+        mpo_sites: int,
+    ) -> "MPOLinear":
         if mpo_sites < 2:
             raise ValueError("mpo_sites must be at least 2")
         if not 0 < rank_ratio <= 1:
             raise ValueError("rank_ratio must be in (0, 1]")
 
-        weight = layer.weight.detach().cpu()
         out_features, in_features = weight.shape
         out_factors = _partition_factors(out_features, mpo_sites)
         in_factors = _partition_factors(in_features, mpo_sites)
@@ -147,14 +166,12 @@ class MPOLinear(nn.Module):
 
             cores.append((u_r * torch.sqrt(s_r)).reshape(left_rank, out_dim, in_dim, rank))
 
-            # Site 0 has shape (o0, i0, o1, i1, ...); later remainders
-            # already have a leading MPO bond dimension.
             remainder_start = 2 if site == 0 else 3
             remainder = (torch.sqrt(s_r).unsqueeze(1) * vh_r).reshape(rank, *rest_shape[remainder_start:])
             left_rank = rank
 
         cores.append(remainder.reshape(left_rank, out_factors[-1], in_factors[-1]))
-        bias = layer.bias.detach().cpu() if layer.bias is not None else None
+        bias = bias_parameter.detach().cpu() if bias_parameter is not None else None
         return cls([c.contiguous() for c in cores], in_factors, out_factors, bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -167,7 +184,6 @@ class MPOLinear(nn.Module):
         x = inputs.reshape(*batch_shape, *self.in_factors)
         k = len(self.in_factors)
 
-        # Intermediate layout: batch, input_0..input_{k-2}, bond, output_{k-1}.
         contracted = torch.einsum("...i,roi->...ro", x, self.cores[-1])
 
         for site in range(k - 2, -1, -1):
@@ -176,9 +192,6 @@ class MPOLinear(nn.Module):
             core = self.cores[site]
             contracted = torch.tensordot(contracted, core, dims=([input_axis, bond_axis], [2, 3]))
 
-            # tensordot gives: batch, earlier inputs, existing outputs,
-            # previous bond, current output. Move the new bond to the front
-            # of the output block while keeping outputs in original order.
             prefix_len = batch_dims + site
             previous_bond_axis = contracted.ndim - 2
             current_output_axis = contracted.ndim - 1
@@ -190,8 +203,6 @@ class MPOLinear(nn.Module):
                 *range(existing_output_start, previous_bond_axis),
             )
 
-        # Boundary bond has size one. Remaining dimensions are output factors
-        # in the original order: o0, o1, ..., o{k-1}.
         contracted = contracted.squeeze(batch_dims)
         outputs = contracted.reshape(*batch_shape, _product(self.out_factors))
         if self.bias is not None:
