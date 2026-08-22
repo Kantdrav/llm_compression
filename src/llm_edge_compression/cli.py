@@ -17,11 +17,13 @@ app = typer.Typer(add_completion=False, help="Compress LLMs and export edge-read
 def compress(
     model_id: str = typer.Option(..., help="Model name or local checkpoint path."),
     output_dir: Path = typer.Option(..., help="Directory for compressed artifacts."),
-    method: str = typer.Option("tensor_inspired", help="Compression method: quantize, tensor_inspired, or mpo."),
+    method: str = typer.Option("tensor_inspired", help="Compression method: quantize, tensor_inspired, mpo, or paper_mpo."),
     rank_ratio: float = typer.Option(0.5, help="Fixed MPO rank fraction. Preserved for non-adaptive mode."),
     adaptive_rank: bool = typer.Option(False, help="Use adaptive per-layer MPO rank selection. Only applies to --method mpo."),
     target_reduction: float = typer.Option(0.30, help="Adaptive MPO target reduction fraction. Used as a conservative rank floor."),
     adaptive_energy_threshold: float = typer.Option(0.995, help="Fraction of singular-value energy retained per adaptive layer."),
+    bond_dim: int = typer.Option(16, help="Research MPO bond dimension chi. Used by --method paper_mpo."),
+    mpo_sites: int = typer.Option(3, help="Number of MPO sites/cores. Used by --method paper_mpo."),
     target_device: str = typer.Option("cpu", help="Target deployment device label."),
     trust_remote_code: bool = typer.Option(False, help="Allow Hugging Face models that require custom remote code."),
     heal_steps: int = typer.Option(0, help="Optional healing steps to run after compression."),
@@ -32,6 +34,10 @@ def compress(
 ) -> None:
     if adaptive_rank and method != "mpo":
         raise typer.BadParameter("--adaptive-rank requires --method mpo")
+    if method == "paper_mpo" and bond_dim < 1:
+        raise typer.BadParameter("--bond-dim must be >= 1")
+    if method == "paper_mpo" and mpo_sites < 2:
+        raise typer.BadParameter("--mpo-sites must be >= 2")
     compression = CompressionConfig(
         model_id=model_id,
         output_dir=output_dir,
@@ -40,6 +46,8 @@ def compress(
         adaptive_rank=adaptive_rank,
         target_reduction=target_reduction,
         adaptive_energy_threshold=adaptive_energy_threshold,
+        bond_dim=bond_dim,
+        mpo_sites=mpo_sites,
         target_device=target_device,
         trust_remote_code=trust_remote_code,
         heal_steps=heal_steps,
