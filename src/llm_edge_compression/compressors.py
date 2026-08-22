@@ -81,11 +81,7 @@ class MPOCompressor(BaseCompressor):
             child_path = f"{module_path}.{child_name}" if module_path else child_name
             if isinstance(child, nn.Linear):
                 if self._should_compress(child_path):
-                    setattr(
-                        module,
-                        child_name,
-                        MPOLinear.from_linear(child, self._rank_ratio_for(child_path), mpo_sites=3),
-                    )
+                    setattr(module, child_name, MPOLinear.from_linear(child, self._rank_ratio_for(child_path), mpo_sites=3))
             else:
                 self._compress_module(child, child_path)
 
@@ -122,11 +118,9 @@ class MPOLinear(nn.Module):
 
         weight = layer.weight.detach().cpu()
         out_features, in_features = weight.shape
-
         out_factors = _partition_factors(out_features, mpo_sites)
         in_factors = _partition_factors(in_features, mpo_sites)
 
-        # Reshape and interleave: o1, i1, o2, i2, ...
         tensor = weight.reshape(*out_factors, *in_factors)
         perm = []
         for i in range(mpo_sites):
@@ -141,82 +135,65 @@ class MPOLinear(nn.Module):
             out_dim = out_factors[site]
             in_dim = in_factors[site]
             rest_shape = remainder.shape
-
             rows = left_rank * out_dim * in_dim
             matricized = remainder.reshape(rows, -1)
             u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
 
             candidate_rank = max(1, int(len(s) * rank_ratio))
             rank = max(1, min(len(s), candidate_rank))
-
             u_r = u[:, :rank]
             s_r = s[:rank]
             vh_r = vh[:rank, :]
 
-            core = (u_r * torch.sqrt(s_r)).reshape(left_rank, out_dim, in_dim, rank)
-            cores.append(core)
+            cores.append((u_r * torch.sqrt(s_r)).reshape(left_rank, out_dim, in_dim, rank))
 
-            # Before the first split, remainder has no leading bond dimension.
-            # After that, axis 0 is always the previous bond dimension, even
-            # when its numerical size happens to be 1.
+            # Site 0 has shape (o0, i0, o1, i1, ...); later remainders
+            # already have a leading MPO bond dimension.
             remainder_start = 2 if site == 0 else 3
-            remainder = (torch.sqrt(s_r).unsqueeze(1) * vh_r).reshape(
-                rank, *rest_shape[remainder_start:]
-            )
+            remainder = (torch.sqrt(s_r).unsqueeze(1) * vh_r).reshape(rank, *rest_shape[remainder_start:])
             left_rank = rank
 
-        # Final core has shape (left_rank, out_k, in_k).
         cores.append(remainder.reshape(left_rank, out_factors[-1], in_factors[-1]))
-
         bias = layer.bias.detach().cpu() if layer.bias is not None else None
-        return cls(cores=[c.contiguous() for c in cores], in_factors=in_factors, out_factors=out_factors, bias=bias)
+        return cls([c.contiguous() for c in cores], in_factors, out_factors, bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        if inputs.shape[-1] != _product(self.in_factors):
-            raise ValueError(
-                f"Expected input feature size {_product(self.in_factors)}, got {inputs.shape[-1]}"
-            )
+        expected_in = _product(self.in_factors)
+        if inputs.shape[-1] != expected_in:
+            raise ValueError(f"Expected input feature size {expected_in}, got {inputs.shape[-1]}")
 
         batch_shape = inputs.shape[:-1]
+        batch_dims = len(batch_shape)
         x = inputs.reshape(*batch_shape, *self.in_factors)
         k = len(self.in_factors)
 
-        # Contract the final input factor with the final core first. The
-        # intermediate layout is: batch, remaining input factors, bond, outputs.
+        # Intermediate layout: batch, input_0..input_{k-2}, bond, output_{k-1}.
         contracted = torch.einsum("...i,roi->...ro", x, self.cores[-1])
-        batch_dims = len(batch_shape)
 
-        # Contract each remaining input factor and MPO bond from right to left.
-        # tensordot keeps this implementation independent of the number of sites.
         for site in range(k - 2, -1, -1):
             input_axis = batch_dims + site
             bond_axis = input_axis + 1
             core = self.cores[site]
+            contracted = torch.tensordot(contracted, core, dims=([input_axis, bond_axis], [2, 3]))
 
-            contracted = torch.tensordot(
-                contracted,
-                core,
-                dims=([input_axis, bond_axis], [2, 3]),
-            )
-
-            # tensordot returns: batch, earlier-inputs, existing-outputs,
-            # previous-bond, current-output. Move the new bond before outputs.
+            # tensordot gives: batch, earlier inputs, existing outputs,
+            # previous bond, current output. Move the new bond to the front
+            # of the output block while keeping outputs in original order.
             prefix_len = batch_dims + site
-            total_dims = contracted.ndim
-            previous_bond_axis = total_dims - 2
-            current_output_axis = total_dims - 1
+            previous_bond_axis = contracted.ndim - 2
+            current_output_axis = contracted.ndim - 1
+            existing_output_start = prefix_len
             contracted = contracted.permute(
                 *range(prefix_len),
                 previous_bond_axis,
-                *range(prefix_len, previous_bond_axis),
                 current_output_axis,
+                *range(existing_output_start, previous_bond_axis),
             )
 
-        # The left boundary bond is size 1. The remaining dimensions are all
-        # output factors in left-to-right order.
+        # Boundary bond has size one. Remaining dimensions are output factors
+        # in the original order: o0, o1, ..., o{k-1}.
         contracted = contracted.squeeze(batch_dims)
         outputs = contracted.reshape(*batch_shape, _product(self.out_factors))
-
         if self.bias is not None:
             outputs = outputs + self.bias
         return outputs
@@ -230,7 +207,6 @@ def _product(values: Iterable[int]) -> int:
 
 
 def _partition_factors(size: int, parts: int) -> list[int]:
-    # Factorize `size` into primes, then distribute primes across `parts` buckets
     def prime_factors(n: int) -> list[int]:
         pf: list[int] = []
         d = 2
@@ -243,35 +219,24 @@ def _partition_factors(size: int, parts: int) -> list[int]:
             pf.append(n)
         return pf
 
-    primes = prime_factors(size)
     factors = [1] * parts
-    for p in sorted(primes, reverse=False):
+    for p in sorted(prime_factors(size)):
         idx = min(range(parts), key=lambda i: factors[i])
         factors[idx] *= p
     prod = _product(factors)
     if prod != size:
-        factors[-1] = factors[-1] * (size // prod)
+        factors[-1] *= size // prod
     return factors
 
 
 class TensorNetworkLinear(nn.Module):
-    def __init__(
-        self,
-        left_core: torch.Tensor,
-        right_core: torch.Tensor,
-        in_factors: Tuple[int, int],
-        out_factors: Tuple[int, int],
-        bias: torch.Tensor | None,
-    ) -> None:
+    def __init__(self, left_core: torch.Tensor, right_core: torch.Tensor, in_factors: Tuple[int, int], out_factors: Tuple[int, int], bias: torch.Tensor | None) -> None:
         super().__init__()
         self.left_core = nn.Parameter(left_core)
         self.right_core = nn.Parameter(right_core)
         self.in_factors = in_factors
         self.out_factors = out_factors
-        if bias is None:
-            self.bias = None
-        else:
-            self.bias = nn.Parameter(bias)
+        self.bias = None if bias is None else nn.Parameter(bias)
 
     @classmethod
     def from_linear(cls, layer: nn.Linear, rank_ratio: float) -> "TensorNetworkLinear":
@@ -279,57 +244,40 @@ class TensorNetworkLinear(nn.Module):
         out_features, in_features = weight.shape
         in_factors = _best_factor_pair(in_features)
         out_factors = _best_factor_pair(out_features)
-
         out_left, out_right = out_factors
         in_left, in_right = in_factors
-
         weight_tensor = weight.reshape(out_left, out_right, in_left, in_right)
         matricized = weight_tensor.permute(0, 2, 1, 3).reshape(out_left * in_left, out_right * in_right)
-
         u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
         candidate_rank = max(1, int(len(s) * rank_ratio))
         compression_budget = max(1, ((out_features * in_features) - 1) // max(out_left * in_left + out_right * in_right, 1))
         rank = max(1, min(len(s), candidate_rank, compression_budget))
-
         left_core = (u[:, :rank] * torch.sqrt(s[:rank])).reshape(out_left, in_left, rank)
         right_core = (torch.sqrt(s[:rank]).unsqueeze(1) * vh[:rank, :]).reshape(rank, out_right, in_right)
-
         bias = layer.bias.detach().cpu() if layer.bias is not None else None
-        return cls(left_core=left_core, right_core=right_core, in_factors=in_factors, out_factors=out_factors, bias=bias)
+        return cls(left_core, right_core, in_factors, out_factors, bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         batch_shape = inputs.shape[:-1]
         in_left, in_right = self.in_factors
         out_left, out_right = self.out_factors
-
         reshaped_inputs = inputs.reshape(*batch_shape, in_left, in_right)
         right_projected = torch.einsum("...uv,rov->...uro", reshaped_inputs, self.right_core)
         outputs = torch.einsum("...uro,bur->...bo", right_projected, self.left_core)
         outputs = outputs.reshape(*batch_shape, out_left * out_right)
-
         if self.bias is not None:
             outputs = outputs + self.bias
         return outputs
 
 
 class TensorNetworkConv1D(nn.Module):
-    def __init__(
-        self,
-        left_core: torch.Tensor,
-        right_core: torch.Tensor,
-        in_factors: Tuple[int, int],
-        out_factors: Tuple[int, int],
-        bias: torch.Tensor | None,
-    ) -> None:
+    def __init__(self, left_core: torch.Tensor, right_core: torch.Tensor, in_factors: Tuple[int, int], out_factors: Tuple[int, int], bias: torch.Tensor | None) -> None:
         super().__init__()
         self.left_core = nn.Parameter(left_core)
         self.right_core = nn.Parameter(right_core)
         self.in_factors = in_factors
         self.out_factors = out_factors
-        if bias is None:
-            self.bias = None
-        else:
-            self.bias = nn.Parameter(bias)
+        self.bias = None if bias is None else nn.Parameter(bias)
 
     @classmethod
     def from_conv1d(cls, layer: nn.Module, rank_ratio: float) -> "TensorNetworkConv1D":
@@ -337,34 +285,27 @@ class TensorNetworkConv1D(nn.Module):
         out_features, in_features = weight.shape
         in_factors = _best_factor_pair(in_features)
         out_factors = _best_factor_pair(out_features)
-
         out_left, out_right = out_factors
         in_left, in_right = in_factors
-
         weight_tensor = weight.reshape(out_left, out_right, in_left, in_right)
         matricized = weight_tensor.permute(0, 2, 1, 3).reshape(out_left * in_left, out_right * in_right)
-
         u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
         candidate_rank = max(1, int(len(s) * rank_ratio))
         compression_budget = max(1, ((out_features * in_features) - 1) // max(out_left * in_left + out_right * in_right, 1))
         rank = max(1, min(len(s), candidate_rank, compression_budget))
-
         left_core = (u[:, :rank] * torch.sqrt(s[:rank])).reshape(out_left, in_left, rank)
         right_core = (torch.sqrt(s[:rank]).unsqueeze(1) * vh[:rank, :]).reshape(rank, out_right, in_right)
-
         bias = layer.bias.detach().cpu() if getattr(layer, "bias", None) is not None else None
-        return cls(left_core=left_core, right_core=right_core, in_factors=in_factors, out_factors=out_factors, bias=bias)
+        return cls(left_core, right_core, in_factors, out_factors, bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         batch_shape = inputs.shape[:-1]
         in_left, in_right = self.in_factors
         out_left, out_right = self.out_factors
-
         reshaped_inputs = inputs.reshape(*batch_shape, in_left, in_right)
         right_projected = torch.einsum("...uv,rov->...uro", reshaped_inputs, self.right_core)
         outputs = torch.einsum("...uro,bur->...bo", right_projected, self.left_core)
         outputs = outputs.reshape(*batch_shape, out_left * out_right)
-
         if self.bias is not None:
             outputs = outputs + self.bias
         return outputs
