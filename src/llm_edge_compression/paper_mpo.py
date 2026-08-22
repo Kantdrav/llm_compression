@@ -11,18 +11,117 @@ try:
 except ImportError:  # pragma: no cover
     Conv1D = None
 
-from .compressors import MPOLinear
+from .compressors import MPOLinear, _partition_factors
 from .config import CompressionPolicy
+
+
+class ResearchMPOLinear(MPOLinear):
+    """MPO Linear layer whose TT-SVD uses an explicit bond dimension chi.
+
+    This deliberately does not convert chi into a global rank ratio. At every
+    internal TT/MPO bond, TT-SVD truncates the singular spectrum to at most chi.
+    """
+
+    @classmethod
+    def from_linear(
+        cls,
+        layer: nn.Linear,
+        *,
+        bond_dim: int,
+        mpo_sites: int = 3,
+    ) -> "ResearchMPOLinear":
+        return cls._from_weight_exact(
+            layer.weight.detach().cpu(),
+            layer.bias,
+            bond_dim=bond_dim,
+            mpo_sites=mpo_sites,
+        )
+
+    @classmethod
+    def from_conv1d(
+        cls,
+        layer: nn.Module,
+        *,
+        bond_dim: int,
+        mpo_sites: int = 3,
+    ) -> "ResearchMPOLinear":
+        weight = layer.weight.detach().cpu().t()
+        return cls._from_weight_exact(
+            weight,
+            getattr(layer, "bias", None),
+            bond_dim=bond_dim,
+            mpo_sites=mpo_sites,
+        )
+
+    @classmethod
+    def _from_weight_exact(
+        cls,
+        weight: torch.Tensor,
+        bias_parameter: torch.Tensor | nn.Parameter | None,
+        *,
+        bond_dim: int,
+        mpo_sites: int,
+    ) -> "ResearchMPOLinear":
+        if mpo_sites < 2:
+            raise ValueError("mpo_sites must be at least 2")
+        if bond_dim < 1:
+            raise ValueError("bond_dim must be >= 1")
+
+        out_features, in_features = weight.shape
+        out_factors = _partition_factors(out_features, mpo_sites)
+        in_factors = _partition_factors(in_features, mpo_sites)
+
+        # Convert W[o, i] into an MPO tensor with paired physical dimensions:
+        # [o1, i1, o2, i2, ..., oN, iN].
+        tensor = weight.reshape(*out_factors, *in_factors)
+        perm: list[int] = []
+        for i in range(mpo_sites):
+            perm.extend((i, mpo_sites + i))
+        remainder = tensor.permute(*perm).contiguous()
+
+        cores: list[torch.Tensor] = []
+        left_rank = 1
+
+        # TT-SVD. chi is the actual maximum internal bond dimension.
+        for site in range(mpo_sites - 1):
+            out_dim = out_factors[site]
+            in_dim = in_factors[site]
+            rest_shape = remainder.shape
+            rows = left_rank * out_dim * in_dim
+            matricized = remainder.reshape(rows, -1)
+
+            u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
+            rank = max(1, min(int(bond_dim), len(s)))
+
+            u_r = u[:, :rank]
+            s_r = s[:rank]
+            vh_r = vh[:rank, :]
+
+            cores.append(
+                (u_r * torch.sqrt(s_r))
+                .reshape(left_rank, out_dim, in_dim, rank)
+                .contiguous()
+            )
+
+            remainder_start = 2 if site == 0 else 3
+            remainder = (
+                torch.sqrt(s_r).unsqueeze(1) * vh_r
+            ).reshape(rank, *rest_shape[remainder_start:]).contiguous()
+            left_rank = rank
+
+        cores.append(
+            remainder.reshape(left_rank, out_factors[-1], in_factors[-1]).contiguous()
+        )
+        bias = bias_parameter.detach().cpu() if bias_parameter is not None else None
+        return cls(cores, in_factors, out_factors, bias)
 
 
 @dataclass(slots=True)
 class ResearchMPOCompressor:
     """Research-inspired MPO compressor with an explicit bond-dimension budget.
 
-    This follows the practical workflow described in the supplied research notes:
-    use TT/MPO-SVD, protect early/sensitive modules through a layer policy, and
-    expose an explicit bond dimension rather than hiding it behind a rank ratio.
-    It is not a claim of byte-for-byte reproduction of any particular paper.
+    The research path uses TT-SVD directly with chi as the maximum TT/MPO bond
+    dimension. Early/sensitive modules are protected by the default layer policy.
     """
 
     bond_dim: int = 16
@@ -44,30 +143,31 @@ class ResearchMPOCompressor:
             child_path = f"{module_path}.{child_name}" if module_path else child_name
             if isinstance(child, nn.Linear):
                 if self._should_compress(child_path):
-                    ratio = self._rank_ratio(child.weight.detach().cpu(), self.bond_dim)
-                    setattr(module, child_name, MPOLinear.from_linear(child, ratio, mpo_sites=self.mpo_sites))
+                    setattr(
+                        module,
+                        child_name,
+                        ResearchMPOLinear.from_linear(
+                            child,
+                            bond_dim=self.bond_dim,
+                            mpo_sites=self.mpo_sites,
+                        ),
+                    )
             elif Conv1D is not None and isinstance(child, Conv1D):
                 if self._should_compress(child_path):
-                    weight = child.weight.detach().cpu().t()
-                    ratio = self._rank_ratio(weight, self.bond_dim)
-                    setattr(module, child_name, MPOLinear.from_conv1d(child, ratio, mpo_sites=self.mpo_sites))
+                    setattr(
+                        module,
+                        child_name,
+                        ResearchMPOLinear.from_conv1d(
+                            child,
+                            bond_dim=self.bond_dim,
+                            mpo_sites=self.mpo_sites,
+                        ),
+                    )
             else:
                 self._compress_module(child, child_path)
 
     def _should_compress(self, module_path: str) -> bool:
-        return not any(re.search(pattern, module_path) for pattern in self.layer_policy.skip_module_patterns)
-
-    @staticmethod
-    def _rank_ratio(weight: torch.Tensor, bond_dim: int) -> float:
-        """Convert an explicit MPO bond dimension into the existing TT-SVD API.
-
-        The existing MPOLinear expects a fraction of the available singular
-        values. Computing the maximum feasible rank lets us express the paper's
-        chi/bond-dimension idea without replacing the tested contraction code.
-        """
-        out_features, in_features = weight.shape
-        # For a 3-site decomposition the first and second TT bonds cannot exceed
-        # the corresponding matricization dimensions. A conservative global cap
-        # is sufficient because MPOLinear also clamps the rank at every site.
-        max_rank = max(1, min(out_features * in_features, max(out_features, in_features)))
-        return min(1.0, max(1, bond_dim) / max_rank)
+        return not any(
+            re.search(pattern, module_path)
+            for pattern in self.layer_policy.skip_module_patterns
+        )
