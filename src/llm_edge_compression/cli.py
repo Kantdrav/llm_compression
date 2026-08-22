@@ -17,8 +17,11 @@ app = typer.Typer(add_completion=False, help="Compress LLMs and export edge-read
 def compress(
     model_id: str = typer.Option(..., help="Model name or local checkpoint path."),
     output_dir: Path = typer.Option(..., help="Directory for compressed artifacts."),
-    method: str = typer.Option("tensor_inspired", help="Compression method: quantize or tensor_inspired."),
-    rank_ratio: float = typer.Option(0.5, help="Fraction of the maximum linear-layer rank to keep."),
+    method: str = typer.Option("tensor_inspired", help="Compression method: quantize, tensor_inspired, or mpo."),
+    rank_ratio: float = typer.Option(0.5, help="Fixed MPO rank fraction. Preserved for non-adaptive mode."),
+    adaptive_rank: bool = typer.Option(False, help="Use adaptive per-layer MPO rank selection. Only applies to --method mpo."),
+    target_reduction: float = typer.Option(0.30, help="Adaptive MPO target reduction fraction. Used as a conservative rank floor."),
+    adaptive_energy_threshold: float = typer.Option(0.995, help="Fraction of singular-value energy retained per adaptive layer."),
     target_device: str = typer.Option("cpu", help="Target deployment device label."),
     trust_remote_code: bool = typer.Option(False, help="Allow Hugging Face models that require custom remote code."),
     heal_steps: int = typer.Option(0, help="Optional healing steps to run after compression."),
@@ -27,11 +30,16 @@ def compress(
     calibration_batch_size: int = typer.Option(2, help="Synthetic calibration batch size."),
     calibration_sequence_length: int = typer.Option(16, help="Synthetic calibration sequence length."),
 ) -> None:
+    if adaptive_rank and method != "mpo":
+        raise typer.BadParameter("--adaptive-rank requires --method mpo")
     compression = CompressionConfig(
         model_id=model_id,
         output_dir=output_dir,
         method=method,
         rank_ratio=rank_ratio,
+        adaptive_rank=adaptive_rank,
+        target_reduction=target_reduction,
+        adaptive_energy_threshold=adaptive_energy_threshold,
         target_device=target_device,
         trust_remote_code=trust_remote_code,
         heal_steps=heal_steps,
