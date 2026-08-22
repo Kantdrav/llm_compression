@@ -31,6 +31,9 @@ class CompressionConfig:
     output_dir: Path
     method: CompressionMethod = "tensor_inspired"
     rank_ratio: float = 0.5
+    adaptive_rank: bool = False
+    target_reduction: float = 0.30
+    adaptive_energy_threshold: float = 0.995
     target_device: str = "cpu"
     trust_remote_code: bool = False
     quantization_backend: str = "fbgemm"
@@ -56,6 +59,9 @@ def compression_config_to_dict(config: CompressionConfig) -> dict[str, Any]:
         "output_dir": config.output_dir.as_posix(),
         "method": config.method,
         "rank_ratio": config.rank_ratio,
+        "adaptive_rank": config.adaptive_rank,
+        "target_reduction": config.target_reduction,
+        "adaptive_energy_threshold": config.adaptive_energy_threshold,
         "target_device": config.target_device,
         "trust_remote_code": config.trust_remote_code,
         "quantization_backend": config.quantization_backend,
@@ -79,6 +85,9 @@ def compression_config_from_dict(data: dict[str, Any]) -> CompressionConfig:
         output_dir=Path(data["output_dir"]),
         method=data.get("method", "tensor_inspired"),
         rank_ratio=float(data.get("rank_ratio", 0.5)),
+        adaptive_rank=bool(data.get("adaptive_rank", False)),
+        target_reduction=float(data.get("target_reduction", 0.30)),
+        adaptive_energy_threshold=float(data.get("adaptive_energy_threshold", 0.995)),
         target_device=data.get("target_device", "cpu"),
         trust_remote_code=bool(data.get("trust_remote_code", False)),
         quantization_backend=data.get("quantization_backend", "fbgemm"),
