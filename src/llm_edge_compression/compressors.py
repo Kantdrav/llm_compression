@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterable, Tuple
-
 import re
 
 import torch
@@ -23,54 +22,46 @@ class BaseCompressor(ABC):
         raise NotImplementedError
 
 
-@dataclass(slots=True)
-class DynamicQuantizationCompressor(BaseCompressor):
-    backend: str = "fbgemm"
-
-    def compress(self, model: nn.Module) -> nn.Module:
-        model = model.to("cpu").eval()
-        torch.backends.quantized.engine = self.backend
-        return torch.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
-
-
-@dataclass(slots=True)
 class TensorNetworkCompressor(BaseCompressor):
-    rank_ratio: float = 0.5
-    layer_policy: CompressionPolicy = field(default_factory=CompressionPolicy)
+    """Compress Linear layers using the legacy rank-ratio tensor-network path."""
+
+    def __init__(self, rank_ratio: float = 0.5, layer_policy: CompressionPolicy | None = None):
+        self.rank_ratio = rank_ratio
+        self.layer_policy = layer_policy or CompressionPolicy()
 
     def compress(self, model: nn.Module) -> nn.Module:
-        model = model.to("cpu").eval()
         self._compress_module(model)
         return model
 
     def _compress_module(self, module: nn.Module, module_path: str = "") -> None:
         for child_name, child in list(module.named_children()):
             child_path = f"{module_path}.{child_name}" if module_path else child_name
-            if isinstance(child, nn.Linear):
-                if self._should_compress(child_path):
-                    setattr(module, child_name, TensorNetworkLinear.from_linear(child, self._rank_ratio_for(child_path)))
-            elif Conv1D is not None and isinstance(child, Conv1D):
-                if self._should_compress(child_path):
-                    setattr(module, child_name, TensorNetworkConv1D.from_conv1d(child, self._rank_ratio_for(child_path)))
+            if isinstance(child, nn.Linear) and self._should_compress(child_path):
+                setattr(module, child_name, TensorNetworkLinear.from_linear(child, self._rank_ratio_for(child_path)))
             else:
                 self._compress_module(child, child_path)
+
+    def _rank_ratio_for(self, module_path: str) -> float:
+        return self.rank_ratio
 
     def _should_compress(self, module_path: str) -> bool:
         return not any(re.search(pattern, module_path) for pattern in self.layer_policy.skip_module_patterns)
 
-    def _rank_ratio_for(self, module_path: str) -> float:
-        return self.layer_policy.layer_rank_overrides.get(module_path, self.rank_ratio)
+
+class DynamicQuantizationCompressor(BaseCompressor):
+    def compress(self, model: nn.Module) -> nn.Module:
+        return torch.ao.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
 
 
-class LowRankCompressor(TensorNetworkCompressor):
-    pass
-
-
-@dataclass(slots=True)
 class MPOCompressor(BaseCompressor):
     """Compress Linear and GPT-2 Conv1D layers with a truncated MPO."""
-    rank_ratio: float = 0.5
-    layer_policy: CompressionPolicy = field(default_factory=CompressionPolicy)
+
+    def __init__(self, rank_ratio: float = 0.5, layer_policy: CompressionPolicy | None = None):
+        self.rank_ratio = rank_ratio
+        self.layer_policy = layer_policy or CompressionPolicy()
+
+    def _rank_ratio_for(self, module_path: str) -> float:
+        return self.rank_ratio
 
     def compress(self, model: nn.Module) -> nn.Module:
         self._compress_module(model)
@@ -90,9 +81,6 @@ class MPOCompressor(BaseCompressor):
 
     def _should_compress(self, module_path: str) -> bool:
         return not any(re.search(pattern, module_path) for pattern in self.layer_policy.skip_module_patterns)
-
-    def _rank_ratio_for(self, module_path: str) -> float:
-        return self.layer_policy.layer_rank_overrides.get(module_path, self.rank_ratio)
 
 
 class MPOLinear(nn.Module):
@@ -175,36 +163,56 @@ class MPOLinear(nn.Module):
         return cls([c.contiguous() for c in cores], in_factors, out_factors, bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Contract the MPO directly without reconstructing the dense matrix.
+
+        Core convention is [left_bond, output_site, input_site, right_bond].
+        The previous implementation used axis arithmetic that could silently
+        permute output/input sites during the repeated contractions. That is
+        catastrophic for autoregressive LMs: the layer remains shape-correct but
+        no longer represents the TT/MPO matrix produced by TT-SVD. The explicit
+        einsum contraction below preserves the site order exactly.
+        """
         expected_in = _product(self.in_factors)
         if inputs.shape[-1] != expected_in:
             raise ValueError(f"Expected input feature size {expected_in}, got {inputs.shape[-1]}")
 
-        batch_shape = inputs.shape[:-1]
-        batch_dims = len(batch_shape)
-        x = inputs.reshape(*batch_shape, *self.in_factors)
-        k = len(self.in_factors)
+        x = inputs.reshape(*inputs.shape[:-1], *self.in_factors)
+        n = len(self.in_factors)
 
-        contracted = torch.einsum("...i,roi->...ro", x, self.cores[-1])
+        # Integer einsum labels avoid string-label limits and make the mapping
+        # from physical input/output sites to TT bonds explicit.
+        input_labels = list(range(n))
+        output_labels = list(range(n, 2 * n))
+        bond_labels = list(range(2 * n, 2 * n + n - 1))
 
-        for site in range(k - 2, -1, -1):
-            input_axis = batch_dims + site
-            bond_axis = input_axis + 1
-            core = self.cores[site]
-            contracted = torch.tensordot(contracted, core, dims=([input_axis, bond_axis], [2, 3]))
+        current = x
+        current_labels: list[object] = [Ellipsis, *input_labels]
 
-            prefix_len = batch_dims + site
-            previous_bond_axis = contracted.ndim - 2
-            current_output_axis = contracted.ndim - 1
-            existing_output_start = prefix_len
-            contracted = contracted.permute(
-                *range(prefix_len),
-                previous_bond_axis,
-                current_output_axis,
-                *range(existing_output_start, previous_bond_axis),
-            )
+        for site, core in enumerate(self.cores):
+            in_label = input_labels[site]
+            out_label = output_labels[site]
+            if site == 0:
+                # First core has left bond dimension 1; remove that singleton
+                # dimension so it does not need to participate in the contraction.
+                core_operand = core.squeeze(0)
+                core_labels: list[object] = [out_label, in_label, bond_labels[0]] if n > 1 else [out_label, in_label]
+                new_labels: list[object] = [Ellipsis, *output_labels[:1], *input_labels[1:], bond_labels[0]] if n > 1 else [Ellipsis, out_label]
+            elif site < n - 1:
+                bond_in = bond_labels[site - 1]
+                bond_out = bond_labels[site]
+                core_operand = core
+                core_labels = [bond_in, out_label, in_label, bond_out]
+                new_labels = [Ellipsis, *output_labels[: site + 1], *input_labels[site + 1 :], bond_out]
+            else:
+                bond_in = bond_labels[-1]
+                core_operand = core.squeeze(-1)
+                core_labels = [bond_in, out_label, in_label]
+                new_labels = [Ellipsis, *output_labels]
 
-        contracted = contracted.squeeze(batch_dims)
-        outputs = contracted.reshape(*batch_shape, _product(self.out_factors))
+            current = torch.einsum(current, current_labels, core_operand, core_labels, new_labels)
+            current_labels = new_labels
+
+        outputs = current.reshape(*inputs.shape[:-1], _product(self.out_factors))
         if self.bias is not None:
             outputs = outputs + self.bias
         return outputs
@@ -241,100 +249,31 @@ def _partition_factors(size: int, parts: int) -> list[int]:
 
 
 class TensorNetworkLinear(nn.Module):
-    def __init__(self, left_core: torch.Tensor, right_core: torch.Tensor, in_factors: Tuple[int, int], out_factors: Tuple[int, int], bias: torch.Tensor | None) -> None:
+    def __init__(self, left_core: torch.Tensor, right_core: torch.Tensor, bias: torch.Tensor | None = None):
         super().__init__()
         self.left_core = nn.Parameter(left_core)
         self.right_core = nn.Parameter(right_core)
-        self.in_factors = in_factors
-        self.out_factors = out_factors
-        self.bias = None if bias is None else nn.Parameter(bias)
+        self.bias = nn.Parameter(bias) if bias is not None else None
 
     @classmethod
     def from_linear(cls, layer: nn.Linear, rank_ratio: float) -> "TensorNetworkLinear":
-        weight = layer.weight.detach().cpu()
+        weight = layer.weight.detach()
         out_features, in_features = weight.shape
-        in_factors = _best_factor_pair(in_features)
-        out_factors = _best_factor_pair(out_features)
-        out_left, out_right = out_factors
-        in_left, in_right = in_factors
-        weight_tensor = weight.reshape(out_left, out_right, in_left, in_right)
-        matricized = weight_tensor.permute(0, 2, 1, 3).reshape(out_left * in_left, out_right * in_right)
-        u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
-        candidate_rank = max(1, int(len(s) * rank_ratio))
-        compression_budget = max(1, ((out_features * in_features) - 1) // max(out_left * in_left + out_right * in_right, 1))
-        rank = max(1, min(len(s), candidate_rank, compression_budget))
-        left_core = (u[:, :rank] * torch.sqrt(s[:rank])).reshape(out_left, in_left, rank)
-        right_core = (torch.sqrt(s[:rank]).unsqueeze(1) * vh[:rank, :]).reshape(rank, out_right, in_right)
-        bias = layer.bias.detach().cpu() if layer.bias is not None else None
-        return cls(left_core, right_core, in_factors, out_factors, bias)
+        rank = max(1, int(min(out_features, in_features) * rank_ratio))
+        u, s, vh = torch.linalg.svd(weight, full_matrices=False)
+        u = u[:, :rank]
+        s = s[:rank]
+        vh = vh[:rank, :]
+        left = u * torch.sqrt(s)
+        right = torch.sqrt(s).unsqueeze(1) * vh
+        return cls(left.cpu(), right.cpu(), layer.bias.detach().cpu() if layer.bias is not None else None)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        batch_shape = inputs.shape[:-1]
-        in_left, in_right = self.in_factors
-        out_left, out_right = self.out_factors
-        reshaped_inputs = inputs.reshape(*batch_shape, in_left, in_right)
-        right_projected = torch.einsum("...uv,rov->...uro", reshaped_inputs, self.right_core)
-        outputs = torch.einsum("...uro,bur->...bo", right_projected, self.left_core)
-        outputs = outputs.reshape(*batch_shape, out_left * out_right)
+        outputs = inputs.matmul(self.right_core.t()).matmul(self.left_core.t())
         if self.bias is not None:
             outputs = outputs + self.bias
         return outputs
-
-
-class TensorNetworkConv1D(nn.Module):
-    def __init__(self, left_core: torch.Tensor, right_core: torch.Tensor, in_factors: Tuple[int, int], out_factors: Tuple[int, int], bias: torch.Tensor | None) -> None:
-        super().__init__()
-        self.left_core = nn.Parameter(left_core)
-        self.right_core = nn.Parameter(right_core)
-        self.in_factors = in_factors
-        self.out_factors = out_factors
-        self.bias = None if bias is None else nn.Parameter(bias)
-
-    @classmethod
-    def from_conv1d(cls, layer: nn.Module, rank_ratio: float) -> "TensorNetworkConv1D":
-        weight = layer.weight.detach().cpu().t()
-        out_features, in_features = weight.shape
-        in_factors = _best_factor_pair(in_features)
-        out_factors = _best_factor_pair(out_features)
-        out_left, out_right = out_factors
-        in_left, in_right = in_factors
-        weight_tensor = weight.reshape(out_left, out_right, in_left, in_right)
-        matricized = weight_tensor.permute(0, 2, 1, 3).reshape(out_left * in_left, out_right * in_right)
-        u, s, vh = torch.linalg.svd(matricized, full_matrices=False)
-        candidate_rank = max(1, int(len(s) * rank_ratio))
-        compression_budget = max(1, ((out_features * in_features) - 1) // max(out_left * in_left + out_right * in_right, 1))
-        rank = max(1, min(len(s), candidate_rank, compression_budget))
-        left_core = (u[:, :rank] * torch.sqrt(s[:rank])).reshape(out_left, in_left, rank)
-        right_core = (torch.sqrt(s[:rank]).unsqueeze(1) * vh[:rank, :]).reshape(rank, out_right, in_right)
-        bias = layer.bias.detach().cpu() if getattr(layer, "bias", None) is not None else None
-        return cls(left_core, right_core, in_factors, out_factors, bias)
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        batch_shape = inputs.shape[:-1]
-        in_left, in_right = self.in_factors
-        out_left, out_right = self.out_factors
-        reshaped_inputs = inputs.reshape(*batch_shape, in_left, in_right)
-        right_projected = torch.einsum("...uv,rov->...uro", reshaped_inputs, self.right_core)
-        outputs = torch.einsum("...uro,bur->...bo", right_projected, self.left_core)
-        outputs = outputs.reshape(*batch_shape, out_left * out_right)
-        if self.bias is not None:
-            outputs = outputs + self.bias
-        return outputs
-
-
-def _best_factor_pair(size: int) -> Tuple[int, int]:
-    root = int(size ** 0.5)
-    for left in range(root, 0, -1):
-        if size % left == 0:
-            return left, size // left
-    return 1, size
 
 
 def count_parameters(model: nn.Module) -> int:
-    return sum(parameter.numel() for parameter in model.parameters())
-
-
-def iter_linear_layers(module: nn.Module) -> Iterable[nn.Linear]:
-    for child in module.modules():
-        if isinstance(child, nn.Linear):
-            yield child
+    return sum(p.numel() for p in model.parameters())
