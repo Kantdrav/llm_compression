@@ -34,6 +34,8 @@ class CompressionConfig:
     adaptive_rank: bool = False
     target_reduction: float = 0.30
     adaptive_energy_threshold: float = 0.995
+    bond_dim: int = 16
+    mpo_sites: int = 3
     target_device: str = "cpu"
     trust_remote_code: bool = False
     quantization_backend: str = "fbgemm"
@@ -62,6 +64,8 @@ def compression_config_to_dict(config: CompressionConfig) -> dict[str, Any]:
         "adaptive_rank": config.adaptive_rank,
         "target_reduction": config.target_reduction,
         "adaptive_energy_threshold": config.adaptive_energy_threshold,
+        "bond_dim": config.bond_dim,
+        "mpo_sites": config.mpo_sites,
         "target_device": config.target_device,
         "trust_remote_code": config.trust_remote_code,
         "quantization_backend": config.quantization_backend,
@@ -88,6 +92,8 @@ def compression_config_from_dict(data: dict[str, Any]) -> CompressionConfig:
         adaptive_rank=bool(data.get("adaptive_rank", False)),
         target_reduction=float(data.get("target_reduction", 0.30)),
         adaptive_energy_threshold=float(data.get("adaptive_energy_threshold", 0.995)),
+        bond_dim=int(data.get("bond_dim", 16)),
+        mpo_sites=int(data.get("mpo_sites", 3)),
         target_device=data.get("target_device", "cpu"),
         trust_remote_code=bool(data.get("trust_remote_code", False)),
         quantization_backend=data.get("quantization_backend", "fbgemm"),
