@@ -9,6 +9,7 @@ from .config import CompressionConfig, ExportConfig
 from .demo import run_demo
 from .inference import chat_loop
 from .pipeline import CompressionPipeline
+from .qlora_healing import QLoRAHealingConfig, heal_with_qlora
 
 app = typer.Typer(add_completion=False, help="Compress LLMs and export edge-ready bundles.")
 
@@ -67,6 +68,68 @@ def compress(
     export = ExportConfig(output_dir=output_dir)
     result = CompressionPipeline(compression, export).run()
     typer.echo(json.dumps({"manifest": result.manifest_path.as_posix(), "metrics": result.manifest.metrics}, indent=2))
+
+
+
+@app.command()
+def heal_qlora(
+    model_id: str = typer.Option(..., help="Original Hugging Face model name or local checkpoint."),
+    output_dir: Path = typer.Option(..., help="Directory where the PEFT LoRA adapter is saved."),
+    layer_pruning_num_layers: int = typer.Option(0, help="Number of Transformer blocks to remove before healing."),
+    layer_pruning_ratio: float = typer.Option(0.0, help="Fraction of Transformer blocks to remove before healing."),
+    layer_pruning_strategy: str = typer.Option("similarity", help="Layer pruning strategy: similarity, deepest, or random."),
+    layer_pruning_seed: int = typer.Option(0, help="Seed for random layer pruning."),
+    dataset: str = typer.Option("allenai/c4", help="Hugging Face dataset used for healing."),
+    dataset_config: str = typer.Option("en", help="Dataset configuration."),
+    dataset_split: str = typer.Option("train", help="Dataset split."),
+    max_samples: int = typer.Option(256, help="Maximum streaming training examples."),
+    max_seq_length: int = typer.Option(512, help="Maximum token sequence length."),
+    max_steps: int = typer.Option(500, help="Maximum optimizer steps."),
+    learning_rate: float = typer.Option(2e-4, help="QLoRA learning rate."),
+    batch_size: int = typer.Option(1, help="Per-device training batch size."),
+    gradient_accumulation_steps: int = typer.Option(16, help="Gradient accumulation steps."),
+    lora_r: int = typer.Option(16, help="LoRA rank."),
+    lora_alpha: int = typer.Option(32, help="LoRA alpha."),
+    lora_dropout: float = typer.Option(0.05, help="LoRA dropout."),
+    seed: int = typer.Option(0, help="Training seed."),
+    compute_dtype: str = typer.Option("bfloat16", help="4-bit compute dtype: bfloat16 or float16."),
+    trust_remote_code: bool = typer.Option(False, help="Allow Hugging Face models requiring custom code."),
+) -> None:
+    config = QLoRAHealingConfig(
+        output_dir=output_dir,
+        dataset=dataset,
+        dataset_config=dataset_config,
+        dataset_split=dataset_split,
+        max_samples=max_samples,
+        max_seq_length=max_seq_length,
+        max_steps=max_steps,
+        learning_rate=learning_rate,
+        per_device_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        seed=seed,
+        compute_dtype=compute_dtype,
+        trust_remote_code=trust_remote_code,
+    )
+    result = heal_with_qlora(
+        model_id,
+        config,
+        layer_pruning_num_layers=layer_pruning_num_layers,
+        layer_pruning_ratio=layer_pruning_ratio,
+        layer_pruning_strategy=layer_pruning_strategy,
+        layer_pruning_seed=layer_pruning_seed,
+    )
+    typer.echo(json.dumps({
+        "adapter_dir": result.adapter_dir.as_posix(),
+        "target_modules": result.target_modules,
+        "trainable_parameters": result.trainable_parameters,
+        "total_parameters": result.total_parameters,
+        "max_steps": result.max_steps,
+        "dataset": result.dataset,
+        "max_samples": result.max_samples,
+    }, indent=2))
 
 
 @app.command()
