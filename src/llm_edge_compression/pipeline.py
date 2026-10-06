@@ -57,6 +57,9 @@ class CompressionPipeline:
         if self.compression.method == "layer_prune":
             calibration_batches = self._build_calibration_batches(model)
             compressor.fit(model, calibration_batches)
+            if compressor.result is not None:
+                self.compression.layer_pruning_selected_layers = tuple(compressor.result.removed_layers)
+                self.compression.layer_pruning_num_layers = len(compressor.result.removed_layers)
             compressed_model = compressor.compress(model)
         else:
             compressed_model = compressor.compress(model)
