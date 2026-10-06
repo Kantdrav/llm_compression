@@ -14,6 +14,7 @@ from .config import CompressionConfig, ExportConfig, compression_config_to_dict
 from .export import EdgeExporter
 from .healing import HealingConfig, heal_model
 from .manifest import ModelManifest, write_manifest
+from .layer_pruner import LayerPruningCompressor, get_transformer_layers
 from .paper_mpo import ResearchMPOCompressor
 
 
@@ -53,7 +54,12 @@ class CompressionPipeline:
         original_model_size_bytes = _state_dict_size_bytes(model)
 
         compressor = self._build_compressor()
-        compressed_model = compressor.compress(model)
+        if self.compression.method == "layer_prune":
+            calibration_batches = self._build_calibration_batches(model)
+            compressor.fit(model, calibration_batches)
+            compressed_model = compressor.compress(model)
+        else:
+            compressed_model = compressor.compress(model)
         healing_batches = self._build_calibration_batches(model)
         if self.compression.heal_steps > 0:
             compressed_model = heal_model(
@@ -67,6 +73,16 @@ class CompressionPipeline:
                 ),
             )
         compressed_parameters = count_parameters(compressed_model)
+        layer_pruning_metrics = {}
+        if self.compression.method == "layer_prune" and getattr(compressor, "result", None):
+            pruning_result = compressor.result
+            layer_pruning_metrics = {
+                "original_transformer_layers": pruning_result.total_layers,
+                "remaining_transformer_layers": len(get_transformer_layers(compressed_model)),
+                "removed_transformer_layers": pruning_result.removed_layers,
+                "layer_pruning_strategy": pruning_result.strategy,
+                "layer_pruning_angular_distance": pruning_result.angular_distance,
+            }
         compressed_model_size_bytes = _state_dict_size_bytes(compressed_model)
 
         size_ratio = compressed_model_size_bytes / max(original_model_size_bytes, 1)
@@ -110,12 +126,21 @@ class CompressionPipeline:
                 "size_reduction_percent": round(size_reduction_percent, 2),
                 "target_device": self.compression.target_device,
                 "heal_steps": self.compression.heal_steps,
+                **layer_pruning_metrics,
             },
         )
         manifest_path = write_manifest(manifest, self.export.output_dir)
         return CompressionRunResult(manifest=manifest, manifest_path=manifest_path, export_dir=self.export.output_dir)
 
     def _build_compressor(self):
+        if self.compression.method == "layer_prune":
+            return LayerPruningCompressor(
+                num_remove=self.compression.layer_pruning_num_layers or None,
+                prune_ratio=self.compression.layer_pruning_ratio or None,
+                strategy=self.compression.layer_pruning_strategy,
+                seed=self.compression.layer_pruning_seed,
+                selected_layers=self.compression.layer_pruning_selected_layers or None,
+            )
         if self.compression.method == "quantize":
             return DynamicQuantizationCompressor(backend=self.compression.quantization_backend)
         if self.compression.method == "mpo":
