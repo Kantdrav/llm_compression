@@ -85,3 +85,29 @@ Required secrets:
 - `RENDER_DEPLOY_HOOK_URL`
 - `VERCEL_TOKEN`
 - `API_BASE_URL`
+
+
+## Similarity-guided layer pruning
+
+The layer-pruning implementation follows the representation-similarity idea from Gromov et al., *The Unreasonable Ineffectiveness of the Deeper Layers* (ICLR 2025). It collects the final-token hidden representation entering each Transformer block on a small calibration set, computes angular distance between representations separated by the proposed pruning width, and removes the contiguous block with the smallest distance.
+
+Supported strategies:
+
+- `similarity`: choose the most redundant contiguous block from calibration representations.
+- `deepest`: remove the deepest eligible blocks; this is a simple baseline.
+- `random`: choose a reproducible random contiguous block.
+
+The final Transformer block is protected. The selected layer indices are persisted in `manifest.json`, allowing a compressed bundle to reconstruct the same pruned architecture during inference.
+
+Example:
+
+```bash
+llm-edge-compression compress \
+  --model-id distilgpt2 \
+  --output-dir artifacts/distilgpt2-pruned \
+  --method layer_prune \
+  --layer-pruning-ratio 0.30 \
+  --layer-pruning-strategy similarity
+```
+
+For a controlled comparison, run the same ratio with `--layer-pruning-strategy deepest`. Do not interpret QA accuracy alone as sufficient validation; compare perplexity and reasoning-sensitive evaluations as well.
