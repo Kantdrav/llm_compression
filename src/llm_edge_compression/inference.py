@@ -11,6 +11,7 @@ from .adaptive_mpo import AdaptiveMPOCompressor
 from .compressors import DynamicQuantizationCompressor, MPOCompressor, TensorNetworkCompressor
 from .config import CompressionConfig, compression_config_from_dict
 from .manifest import ModelManifest, read_manifest
+from .layer_pruner import LayerPruningCompressor
 
 
 @dataclass(slots=True)
@@ -22,6 +23,14 @@ class LoadedCompressedModel:
 
 
 def _build_compressor(compression: CompressionConfig):
+    if compression.method == "layer_prune":
+        return LayerPruningCompressor(
+            num_remove=compression.layer_pruning_num_layers or None,
+            prune_ratio=None,
+            strategy=compression.layer_pruning_strategy,
+            seed=compression.layer_pruning_seed,
+            selected_layers=compression.layer_pruning_selected_layers or None,
+        )
     if compression.method == "quantize":
         return DynamicQuantizationCompressor(backend=compression.quantization_backend)
     if compression.method == "mpo":
