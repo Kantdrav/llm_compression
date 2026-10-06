@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, DataCollatorForLanguageModeling, Trainer, TrainingArguments
 
 from .layer_pruner import LayerPruningCompressor
 
@@ -256,10 +256,12 @@ def heal_with_qlora(
         seed=config.seed,
     )
 
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
+        data_collator=data_collator,
         tokenizer=tokenizer,
     )
     trainer.train()
