@@ -111,3 +111,21 @@ llm-edge-compression compress \
 ```
 
 For a controlled comparison, run the same ratio with `--layer-pruning-strategy deepest`. Do not interpret QA accuracy alone as sufficient validation; compare perplexity and reasoning-sensitive evaluations as well.
+
+## Optional QLoRA healing
+
+After structured layer pruning, the project can optionally run a QLoRA healing stage. This follows the paper's idea of repairing the representation mismatch with parameter-efficient fine-tuning while keeping the base model in 4-bit NF4 quantization.
+
+QLoRA is intentionally an optional dependency because it requires a CUDA GPU and additional packages:
+
+    pip install -e '.[healing]'
+
+A typical experiment is:
+
+    llm-edge-compression heal-qlora --model-id distilgpt2 --output-dir artifacts/distilgpt2-pruned-healing --layer-pruning-ratio 0.30 --layer-pruning-strategy similarity --dataset allenai/c4 --max-samples 256 --max-seq-length 512 --max-steps 500
+
+The command saves a PEFT LoRA adapter rather than merging the adapter into the 4-bit base weights. This keeps the compressed base model quantized and makes the healing artifact small. For deployment, load the same pruned base architecture and attach the saved adapter with PEFT.
+
+Useful controls include `--lora-r`, `--lora-alpha`, `--lora-dropout`, `--learning-rate`, `--gradient-accumulation-steps`, and `--compute-dtype`. `bfloat16` is preferred when the GPU supports it; otherwise the implementation falls back to `float16`.
+
+The existing `heal_steps` path is still available for small/local experiments. QLoRA healing is separate because it has different runtime and dependency requirements and is intended for the paper-style GPU experiment.
