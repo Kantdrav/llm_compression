@@ -25,6 +25,14 @@ dependencies = [
   "gunicorn>=20.1",
 ]
 
+[project.optional-dependencies]
+healing = [
+  "accelerate>=0.33",
+  "bitsandbytes>=0.43",
+  "datasets>=2.20",
+  "peft>=0.12",
+]
+
 [project.scripts]
 llm-edge-compression = "llm_edge_compression.cli:main"
 llm-edge-server = "llm_edge_compression.server:run"
