@@ -51,6 +51,24 @@ class CompressionConfig:
     calibration_batches: int = 8
     calibration_batch_size: int = 2
     calibration_sequence_length: int = 16
+    qlora_healing: bool = False
+    qlora_output_dir: Path | None = None
+    qlora_dataset: str = "allenai/c4"
+    qlora_dataset_config: str = "en"
+    qlora_dataset_split: str = "train"
+    qlora_max_samples: int = 256
+    qlora_max_seq_length: int = 512
+    qlora_max_steps: int = 500
+    qlora_learning_rate: float = 2e-4
+    qlora_warmup_ratio: float = 0.03
+    qlora_weight_decay: float = 0.0
+    qlora_batch_size: int = 1
+    qlora_gradient_accumulation_steps: int = 16
+    qlora_r: int = 16
+    qlora_alpha: int = 32
+    qlora_dropout: float = 0.05
+    qlora_seed: int = 0
+    qlora_compute_dtype: str = "bfloat16"
 
 
 @dataclass(slots=True)
@@ -89,6 +107,24 @@ def compression_config_to_dict(config: CompressionConfig) -> dict[str, Any]:
         "calibration_batches": config.calibration_batches,
         "calibration_batch_size": config.calibration_batch_size,
         "calibration_sequence_length": config.calibration_sequence_length,
+        "qlora_healing": config.qlora_healing,
+        "qlora_output_dir": config.qlora_output_dir.as_posix() if config.qlora_output_dir else None,
+        "qlora_dataset": config.qlora_dataset,
+        "qlora_dataset_config": config.qlora_dataset_config,
+        "qlora_dataset_split": config.qlora_dataset_split,
+        "qlora_max_samples": config.qlora_max_samples,
+        "qlora_max_seq_length": config.qlora_max_seq_length,
+        "qlora_max_steps": config.qlora_max_steps,
+        "qlora_learning_rate": config.qlora_learning_rate,
+        "qlora_warmup_ratio": config.qlora_warmup_ratio,
+        "qlora_weight_decay": config.qlora_weight_decay,
+        "qlora_batch_size": config.qlora_batch_size,
+        "qlora_gradient_accumulation_steps": config.qlora_gradient_accumulation_steps,
+        "qlora_r": config.qlora_r,
+        "qlora_alpha": config.qlora_alpha,
+        "qlora_dropout": config.qlora_dropout,
+        "qlora_seed": config.qlora_seed,
+        "qlora_compute_dtype": config.qlora_compute_dtype,
     }
 
 
@@ -122,4 +158,22 @@ def compression_config_from_dict(data: dict[str, Any]) -> CompressionConfig:
         calibration_batches=int(data.get("calibration_batches", 8)),
         calibration_batch_size=int(data.get("calibration_batch_size", 2)),
         calibration_sequence_length=int(data.get("calibration_sequence_length", 16)),
+        qlora_healing=bool(data.get("qlora_healing", False)),
+        qlora_output_dir=Path(data["qlora_output_dir"]) if data.get("qlora_output_dir") else None,
+        qlora_dataset=data.get("qlora_dataset", "allenai/c4"),
+        qlora_dataset_config=data.get("qlora_dataset_config", "en"),
+        qlora_dataset_split=data.get("qlora_dataset_split", "train"),
+        qlora_max_samples=int(data.get("qlora_max_samples", 256)),
+        qlora_max_seq_length=int(data.get("qlora_max_seq_length", 512)),
+        qlora_max_steps=int(data.get("qlora_max_steps", 500)),
+        qlora_learning_rate=float(data.get("qlora_learning_rate", 2e-4)),
+        qlora_warmup_ratio=float(data.get("qlora_warmup_ratio", 0.03)),
+        qlora_weight_decay=float(data.get("qlora_weight_decay", 0.0)),
+        qlora_batch_size=int(data.get("qlora_batch_size", 1)),
+        qlora_gradient_accumulation_steps=int(data.get("qlora_gradient_accumulation_steps", 16)),
+        qlora_r=int(data.get("qlora_r", 16)),
+        qlora_alpha=int(data.get("qlora_alpha", 32)),
+        qlora_dropout=float(data.get("qlora_dropout", 0.05)),
+        qlora_seed=int(data.get("qlora_seed", 0)),
+        qlora_compute_dtype=data.get("qlora_compute_dtype", "bfloat16"),
     )
