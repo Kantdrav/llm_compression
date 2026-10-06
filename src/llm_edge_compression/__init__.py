@@ -4,6 +4,7 @@ from .compressors import TensorNetworkCompressor, TensorNetworkLinear
 from .config import CompressionConfig, CompressionPolicy, ExportConfig
 from .inference import chat_loop, generate_text, load_compressed_bundle
 from .healing import HealingConfig, heal_model
+from .layer_pruner import LayerPruningCompressor, LayerPruningResult, get_transformer_layers
 from .pipeline import CompressionPipeline
 from .tn_model_compressor import (
 	TensorNetworkModelCompressor,
@@ -26,4 +27,7 @@ __all__ = [
 	"generate_text",
 	"load_compressed_bundle",
 	"heal_model",
+	"LayerPruningCompressor",
+	"LayerPruningResult",
+	"get_transformer_layers",
 ]
