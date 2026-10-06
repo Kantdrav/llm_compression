@@ -40,6 +40,11 @@ class CompressionConfig:
     trust_remote_code: bool = False
     quantization_backend: str = "fbgemm"
     layer_policy: CompressionPolicy = field(default_factory=CompressionPolicy.paper_default)
+    layer_pruning_strategy: str = "similarity"
+    layer_pruning_ratio: float = 0.0
+    layer_pruning_num_layers: int = 0
+    layer_pruning_seed: int = 0
+    layer_pruning_selected_layers: tuple[int, ...] = ()
     heal_steps: int = 0
     heal_learning_rate: float = 1e-4
     heal_weight_decay: float = 0.0
@@ -73,6 +78,11 @@ def compression_config_to_dict(config: CompressionConfig) -> dict[str, Any]:
             "skip_module_patterns": list(config.layer_policy.skip_module_patterns),
             "layer_rank_overrides": dict(config.layer_policy.layer_rank_overrides),
         },
+        "layer_pruning_strategy": config.layer_pruning_strategy,
+        "layer_pruning_ratio": config.layer_pruning_ratio,
+        "layer_pruning_num_layers": config.layer_pruning_num_layers,
+        "layer_pruning_seed": config.layer_pruning_seed,
+        "layer_pruning_selected_layers": list(config.layer_pruning_selected_layers),
         "heal_steps": config.heal_steps,
         "heal_learning_rate": config.heal_learning_rate,
         "heal_weight_decay": config.heal_weight_decay,
@@ -101,6 +111,11 @@ def compression_config_from_dict(data: dict[str, Any]) -> CompressionConfig:
             skip_module_patterns=tuple(layer_policy_data.get("skip_module_patterns", ())),
             layer_rank_overrides=dict(layer_policy_data.get("layer_rank_overrides", {})),
         ),
+        layer_pruning_strategy=data.get("layer_pruning_strategy", "similarity"),
+        layer_pruning_ratio=float(data.get("layer_pruning_ratio", 0.0)),
+        layer_pruning_num_layers=int(data.get("layer_pruning_num_layers", 0)),
+        layer_pruning_seed=int(data.get("layer_pruning_seed", 0)),
+        layer_pruning_selected_layers=tuple(int(x) for x in data.get("layer_pruning_selected_layers", ())),
         heal_steps=int(data.get("heal_steps", 0)),
         heal_learning_rate=float(data.get("heal_learning_rate", 1e-4)),
         heal_weight_decay=float(data.get("heal_weight_decay", 0.0)),
