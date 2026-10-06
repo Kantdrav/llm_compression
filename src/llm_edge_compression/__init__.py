@@ -5,6 +5,7 @@ from .config import CompressionConfig, CompressionPolicy, ExportConfig
 from .inference import chat_loop, generate_text, load_compressed_bundle
 from .healing import HealingConfig, heal_model
 from .layer_pruner import LayerPruningCompressor, LayerPruningResult, get_transformer_layers
+from .qlora_healing import QLoRAHealingConfig, QLoRAHealingResult, find_lora_target_modules, heal_with_qlora
 from .pipeline import CompressionPipeline
 from .tn_model_compressor import (
 	TensorNetworkModelCompressor,
