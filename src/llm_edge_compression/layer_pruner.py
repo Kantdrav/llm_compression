@@ -132,6 +132,8 @@ def collect_layer_representations(
 
 def angular_distance(x: torch.Tensor, y: torch.Tensor) -> float:
     """Angular distance in radians between two hidden representations."""
+    if torch.equal(x, y):
+        return 0.0
     x = x.float().reshape(1, -1)
     y = y.float().reshape(1, -1)
     cosine = F.cosine_similarity(x, y, dim=-1).clamp(-1.0, 1.0)
@@ -203,6 +205,8 @@ class LayerPruningCompressor:
     def fit(self, model: nn.Module, calibration_batches: Iterable[dict[str, torch.Tensor]]) -> LayerPruningResult:
         total_layers = len(get_transformer_layers(model))
         num_remove = self.num_remove
+        if self.selected_layers is not None:
+            num_remove = len(self.selected_layers)
         if num_remove is None:
             num_remove = max(1, int(total_layers * float(self.prune_ratio)))
         if num_remove >= total_layers:

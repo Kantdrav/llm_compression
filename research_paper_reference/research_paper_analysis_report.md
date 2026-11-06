@@ -19,7 +19,7 @@ practical model compression:
    (`4.pdf`, `1.pdf`, `14.pdf`).
 4. **Tensor neural networks and variational training** extend the approach to
    trainable, hybrid tensor/dense models and nontraditional workloads
-   (`6.pdf`, `7.pdf`/`8.pdf`, `9.pdf`).
+   (`6.pdf`, `7.pdf`, `9.pdf`).
 5. **Layer pruning with lightweight healing** demonstrates that compression
    should be evaluated jointly with selective recovery fine-tuning (`11.pdf`).
 
@@ -42,7 +42,6 @@ be measured after compression; parameter count alone is insufficient.
 | `5.pdf` | 16 | Jacob Devlin et al., *BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding* (2018) | Bidirectional pretraining and transfer to downstream tasks | Shows why protected layers and task-level regression tests matter |
 | `6.pdf` | 14 | Raj G. Patel et al., *Quantum-Inspired Tensor Neural Networks for Partial Differential Equations* (2022) | Tensor neural networks with parameter savings and faster training for PDEs | Demonstrates tensorized models beyond standard language tasks |
 | `7.pdf` | 21 | Saeed S. Jahromi and Roman Orús, *Variational Tensor Neural Networks for Deep Learning* (2024 version) | DMRG-inspired local/variational optimization for tensor neural networks | Suggests fine-tuning tensor cores instead of relying only on one-shot decomposition |
-| `8.pdf` | 21 | Saeed S. Jahromi and Roman Orús, *Variational Tensor Neural Networks for Deep Learning* (duplicate of `7.pdf`) | Same paper and version as `7.pdf` | Duplicate; should not be counted as independent evidence |
 | `9.pdf` | 25 | Maolin Wang et al., *Tensor Networks Meet Neural Networks: A Survey and Future Perspectives* (2025 version) | Survey of tensorial neural networks across CNNs, RNNs, GNNs, Transformers, and LLMs | Provides the broad taxonomy and identifies open research directions |
 | `10.pdf` | 27 | Hugo Touvron et al., *LLaMA: Open and Efficient Foundation Language Models* (2023) | Efficient open foundation models with strong performance at smaller scale | Establishes the LLM deployment context and the value of inference-efficient models |
 | `11.pdf` | 24 | Andrey Gromov et al., *The Unreasonable Ineffectiveness of the Deeper Layers* (ICLR 2025) | Layer pruning followed by small QLoRA healing | Directly supports layer sensitivity analysis and recovery fine-tuning |
@@ -52,8 +51,8 @@ be measured after compression; parameter count alone is insufficient.
 
 ### Duplicate and provenance notes
 
-- `7.pdf` and `8.pdf` have the same title, authors, abstract, arXiv version,
-  and page count. They are treated as one source in the synthesis.
+- The former `8.pdf` was verified to have identical extracted text to `7.pdf`
+  and was removed as a duplicate. `7.pdf` is the canonical copy.
 - PDF filenames are local numeric labels rather than stable citation keys.
   Any publication, citation, or experiment should use the paper title and
   authors above, not only the filename.
@@ -176,16 +175,13 @@ tensorization can be valuable even when the target system is not a quantum
 computer, and parameter savings should be reported together with accuracy and
 training/inference cost.
 
-#### *Variational Tensor Neural Networks for Deep Learning* (`7.pdf` and `8.pdf`)
+#### *Variational Tensor Neural Networks for Deep Learning* (`7.pdf`)
 
 This paper combines tensor-network layers with DMRG-inspired local
 optimization. It supports a stronger research direction than one-shot TT-SVD:
 initialize compressed cores from a decomposition, then optimize them against
 the task loss. Hybrid dense/tensor models are also useful because not every
 layer benefits equally from tensorization.
-
-The duplicate PDFs should be removed or renamed in a future cleanup if the
-collection is intended for automated literature statistics.
 
 #### *Tensor Networks Meet Neural Networks: A Survey and Future Perspectives* (`9.pdf`)
 
@@ -256,7 +252,7 @@ modules, calibration data, hardware, software versions, and random seeds.
 3. Evaluate the original and compressed models on exactly the same tokenizer,
    prompts, sequence lengths, and held-out JSONL data.
 4. Keep protected layers configurable and report the exact matched module paths.
-5. Treat `7.pdf` and `8.pdf` as one source in future automated analyses.
+5. Treat `7.pdf` as the canonical copy of the variational tensor-network paper.
 
 ### Next research experiments
 
