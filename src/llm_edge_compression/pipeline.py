@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -9,7 +10,7 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 
 from .adaptive_mpo import AdaptiveMPOCompressor
-from .compressors import DynamicQuantizationCompressor, TensorNetworkCompressor, count_parameters
+from .compressors import DynamicQuantizationCompressor, MixedCompressionCompressor, TensorNetworkCompressor, count_parameters
 from .config import CompressionConfig, ExportConfig, compression_config_to_dict
 from .export import EdgeExporter
 from .healing import HealingConfig, heal_model
@@ -52,6 +53,7 @@ class CompressionPipeline:
         )
         original_parameters = count_parameters(model)
         original_model_size_bytes = _state_dict_size_bytes(model)
+        teacher_model = deepcopy(model).eval()
 
         compressor = self._build_compressor()
         if self.compression.method == "layer_prune":
@@ -67,7 +69,7 @@ class CompressionPipeline:
         if self.compression.heal_steps > 0:
             compressed_model = heal_model(
                 compressed_model,
-                model,
+                teacher_model,
                 healing_batches,
                 HealingConfig(
                     steps=self.compression.heal_steps,
@@ -146,6 +148,12 @@ class CompressionPipeline:
             )
         if self.compression.method == "quantize":
             return DynamicQuantizationCompressor(backend=self.compression.quantization_backend)
+        if self.compression.method == "mixed":
+            return MixedCompressionCompressor(
+                rank_ratio=self.compression.rank_ratio,
+                layer_policy=self.compression.layer_policy,
+                mpo_sites=self.compression.mpo_sites,
+            )
         if self.compression.method == "mpo":
             if self.compression.adaptive_rank:
                 return AdaptiveMPOCompressor(
