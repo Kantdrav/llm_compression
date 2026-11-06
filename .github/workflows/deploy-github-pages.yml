@@ -1,0 +1,68 @@
+name: Deploy Flutter Web to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Flutter web app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flutter_app
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.22.0"
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build web for GitHub Pages
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: |
+          test -n "$API_BASE_URL" || {
+            echo "::error::Set the API_BASE_URL repository secret before deploying."
+            exit 1
+          }
+          flutter build web --release \
+            --base-href "/${GITHUB_REPOSITORY#*/}/" \
+            --dart-define=API_BASE_URL="$API_BASE_URL"
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: flutter_app/build/web
+
+  deploy:
+    name: Publish to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
