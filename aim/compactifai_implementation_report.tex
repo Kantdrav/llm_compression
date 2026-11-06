@@ -1,0 +1,218 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{longtable}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+  pdftitle={CompactifAI Aim: Implementation and Reproduction Report}
+}
+
+\title{CompactifAI Aim:\\Implementation and Reproduction Report}
+\author{LLM Edge Compression Research}
+\date{2026-11-06}
+
+\begin{document}
+\maketitle
+
+\section{Aim}
+
+Build an edge-efficient large-language-model compression pipeline that
+replaces selected dense Transformer weight matrices with low-bond-dimension
+Matrix Product Operator (MPO) representations, applies quantization to the
+remaining layers, and recovers quality through calibration or fine-tuning.
+The objective is a useful Pareto point: lower memory and storage, acceptable
+target-device latency, and no unacceptable loss on the intended tasks.
+
+\section{What the CompactifAI paper contributes}
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Layer tensorization:} reshape selected LLM matrices and
+    decompose them into MPOs using sequential SVD truncation.
+  \item \textbf{Bond dimension:} use the MPO bond dimension as the direct
+    control for retained representational capacity and compression.
+  \item \textbf{Layer sensitivity profiling:} protect sensitive layers or
+    assign them larger bond dimensions.
+  \item \textbf{Healing/retraining:} recover quality after local truncation by
+    retraining the tensorized model.
+  \item \textbf{Hybrid compression:} combine tensorization with quantization
+    instead of forcing one method on every layer.
+  \item \textbf{System evaluation:} report memory, parameters, training cost,
+    speed, and quality together.
+\end{enumerate}
+
+The paper's reported LLaMA-2 memory reductions are paper results, not
+guarantees for this repository. They must be reproduced with the same model,
+data, hardware, and evaluation protocol before being claimed here.
+
+\section{Current repository position}
+
+The repository already provides:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{ResearchMPOLinear}, which performs explicit TT-SVD with a
+    maximum \texttt{bond\_dim};
+  \item \texttt{ResearchMPOCompressor} for \texttt{nn.Linear} and GPT-2
+    \texttt{Conv1D} modules;
+  \item legacy rank-ratio MPO and low-rank baselines;
+  \item mixed MPO plus dynamic int8 quantization;
+  \item configurable protected-layer policies;
+  \item bundle manifests and next-token evaluation support.
+\end{itemize}
+
+This is a reproduction scaffold rather than a complete CompactifAI
+implementation. The principal missing capabilities are sensitivity-driven
+rank selection, healing/fine-tuning, paper-style benchmark reporting, and
+real-device performance validation.
+
+\section{Implementation roadmap}
+
+\subsection{Phase 0: Freeze a reproducible baseline}
+
+Choose one legally accessible model and evaluation corpus. Record the model
+revision, tokenizer, context length, software versions, hardware, random seed,
+calibration data, evaluation data, batch size, sequence length, parameter
+count, serialized size, peak memory, latency, throughput, and perplexity.
+
+\textbf{Exit criterion:} the uncompressed model produces a saved baseline
+report and can be rerun from a documented command.
+
+\subsection{Phase 1: Validate MPO}
+
+Use deterministic rectangular matrices representative of attention and MLP
+projections. Test several bond dimensions, reconstruction error, forward-pass
+equivalence, GPT-2 weight orientation, serialization, and reload behavior.
+
+\textbf{Exit criterion:} error decreases as bond dimension increases, a
+full-rank setting preserves outputs within numerical tolerance, and
+save/reload is numerically equivalent.
+
+\subsection{Phase 2: Map modules and set safe defaults}
+
+Enumerate embeddings, attention projections, MLP projections, normalization,
+and output-head modules for every model family. Begin conservatively by
+protecting embeddings, the language-model head, the first block, and modules
+that show a large quality drop. Produce a dry-run inventory of compressed and
+skipped modules.
+
+\subsection{Phase 3: Profile layer sensitivity}
+
+Compress one layer or block at a time on a fixed calibration set. Record
+quality change, reconstruction error, original parameters, compressed size,
+and bond dimension. Use the resulting profile to allocate bond dimensions
+under a memory budget.
+
+\textbf{Exit criterion:} a sensitivity-aware policy gives better quality than
+one global bond dimension at the same memory budget.
+
+\subsection{Phase 4: Add healing}
+
+Support both inexpensive calibration-only recovery and PEFT/QLoRA healing.
+Keep the base model frozen where possible, record trainable parameters and
+training cost, and evaluate on held-out data.
+
+\textbf{Exit criterion:} healing recovers a measurable fraction of the quality
+lost during compression without changing the evaluation protocol.
+
+\subsection{Phase 5: Compare hybrid configurations}
+
+\begin{enumerate}[leftmargin=*]
+  \item original model;
+  \item quantization only;
+  \item MPO only;
+  \item MPO plus quantization;
+  \item MPO plus healing;
+  \item MPO plus quantization plus healing.
+\end{enumerate}
+
+For each configuration report parameter count, serialized size, peak memory,
+cold and warm latency, throughput, perplexity or next-token loss, downstream
+scores, healing time, and trainable parameter count. Do not infer runtime
+speed from parameter count; contraction overhead may dominate.
+
+\subsection{Phase 6: Validate edge deployment}
+
+Load the bundle in a fresh environment on the actual target device. Measure
+end-to-end generation across context lengths, peak memory, sustained
+throughput, warm latency, numerical stability, and unsupported-operation
+fallbacks.
+
+\section{Recommended experiment matrix}
+
+\begin{longtable}{p{0.25\textwidth}p{0.32\textwidth}p{0.32\textwidth}}
+\toprule
+\textbf{Experiment} & \textbf{Settings} & \textbf{Question}\\
+\midrule
+MPO reconstruction & 2--4 sites and several bond dimensions &
+Does the expected error/rank trade-off hold?\\
+Global-rank baseline & One bond dimension for eligible layers &
+How far can a simple policy go?\\
+Sensitivity policy & Per-layer protection and bond dimensions &
+Which layers dominate quality loss?\\
+Quantization baseline & int8 and supported int4 &
+What does quantization alone achieve?\\
+Healing ablation & None, calibration, PEFT/QLoRA &
+How much quality is recovered per training cost?\\
+Hardware benchmark & CPU, CUDA, and target edge device &
+Does lower storage reduce end-to-end cost?\\
+Context sweep & Short, medium, and long prompts &
+Does degradation grow with context length?\\
+\bottomrule
+\end{longtable}
+
+\section{Proposed success criteria}
+
+\begin{itemize}[leftmargin=*]
+  \item At least 50\% lower serialized model size.
+  \item At least 30\% lower peak inference memory.
+  \item No more than one percentage point loss on the selected quality metric
+    after healing.
+  \item No unacceptable regression on selected downstream tasks.
+  \item No warm-latency increase on the target device unless the aim is
+    explicitly storage-only compression.
+  \item Deterministic bundle loading and reproducible evaluation.
+\end{itemize}
+
+These are proposed engineering gates, not claims about the source paper.
+
+\section{Deliverables}
+
+\begin{enumerate}[leftmargin=*]
+  \item A machine-readable sensitivity profile and rendered table.
+  \item A baseline/compression benchmark JSON.
+  \item Reproduction commands for each experiment.
+  \item A healed compressed checkpoint and manifest.
+  \item An edge-device benchmark log.
+  \item A comparison against uncompressed and quantization-only baselines.
+  \item Limitations covering licensing, data, unsupported layers, and hardware.
+\end{enumerate}
+
+\section{Immediate next actions}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add MPO reconstruction, forward-equivalence, rectangular-matrix, and
+    serialization tests.
+  \item Add a dry-run module inventory to the compression CLI.
+  \item Implement a one-layer sensitivity profiler with JSON output.
+  \item Add perplexity/next-token-loss reporting.
+  \item Implement a small calibration/healing experiment.
+  \item Run the six-configuration matrix on one fixed model and target device.
+  \item Publish benchmark files with the compressed bundle.
+\end{enumerate}
+
+\section{Conclusion}
+
+Achieving the CompactifAI aim requires moving from ``an MPO decomposition
+exists'' to ``a measured, sensitivity-aware, healed, and deployable workflow
+exists.'' The current code provides the decomposition and hybrid-compression
+foundation. The critical remaining work is profiling, recovery training,
+reproducible evaluation, and real-device benchmarking, in that order.
+
+\end{document}
