@@ -1,10 +1,11 @@
 """LLM compression and edge packaging helpers."""
 
-from .compressors import TensorNetworkCompressor, TensorNetworkLinear
+from .compressors import MixedCompressionCompressor, TensorNetworkCompressor, TensorNetworkLinear
 from .config import CompressionConfig, CompressionPolicy, ExportConfig
 from .inference import chat_loop, generate_text, load_compressed_bundle
 from .healing import HealingConfig, heal_model
 from .pipeline import CompressionPipeline
+from .sensitivity import LayerSensitivityResult, profile_mpo_sensitivity, write_sensitivity_profile
 from .tn_model_compressor import (
 	TensorNetworkModelCompressor,
 	TNCompressionReport,
@@ -17,6 +18,7 @@ __all__ = [
 	"ExportConfig",
 	"CompressionPipeline",
 	"HealingConfig",
+	"MixedCompressionCompressor",
 	"chat_loop",
 	"TensorNetworkCompressor",
 	"TensorNetworkLinear",
@@ -26,4 +28,7 @@ __all__ = [
 	"generate_text",
 	"load_compressed_bundle",
 	"heal_model",
+	"LayerSensitivityResult",
+	"profile_mpo_sensitivity",
+	"write_sensitivity_profile",
 ]

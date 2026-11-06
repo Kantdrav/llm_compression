@@ -4,11 +4,14 @@ import json
 from pathlib import Path
 
 import typer
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import CompressionConfig, ExportConfig
 from .demo import run_demo
 from .inference import chat_loop
 from .pipeline import CompressionPipeline
+from .sensitivity import profile_mpo_sensitivity, write_sensitivity_profile
 
 app = typer.Typer(add_completion=False, help="Compress LLMs and export edge-ready bundles.")
 
@@ -17,7 +20,7 @@ app = typer.Typer(add_completion=False, help="Compress LLMs and export edge-read
 def compress(
     model_id: str = typer.Option(..., help="Model name or local checkpoint path."),
     output_dir: Path = typer.Option(..., help="Directory for compressed artifacts."),
-    method: str = typer.Option("tensor_inspired", help="Compression method: quantize, tensor_inspired, mpo, or paper_mpo."),
+    method: str = typer.Option("tensor_inspired", help="Compression method: quantize, mixed, tensor_inspired, mpo, or paper_mpo."),
     rank_ratio: float = typer.Option(0.5, help="Fixed MPO rank fraction. Preserved for non-adaptive mode."),
     adaptive_rank: bool = typer.Option(False, help="Use adaptive per-layer MPO rank selection. Only applies to --method mpo."),
     target_reduction: float = typer.Option(0.30, help="Adaptive MPO target reduction fraction. Used as a conservative rank floor."),
@@ -65,6 +68,49 @@ def compress(
 def inspect(output_dir: Path = typer.Option(..., help="Directory containing a manifest.json file.")) -> None:
     manifest_path = output_dir / "manifest.json"
     typer.echo(manifest_path.read_text(encoding="utf-8"))
+
+
+@app.command()
+def profile(
+    model_id: str = typer.Option(..., help="Model name or local checkpoint path."),
+    output: Path = typer.Option(..., help="JSON file for the sensitivity profile."),
+    bond_dims: str = typer.Option("4,8,16", help="Comma-separated positive MPO bond dimensions."),
+    mpo_sites: int = typer.Option(3, help="Number of MPO sites/cores."),
+    calibration_batches: int = typer.Option(8, help="Number of synthetic calibration batches."),
+    calibration_batch_size: int = typer.Option(2, help="Synthetic calibration batch size."),
+    calibration_sequence_length: int = typer.Option(16, help="Synthetic calibration sequence length."),
+    trust_remote_code: bool = typer.Option(False, help="Allow Hugging Face models that require custom remote code."),
+) -> None:
+    """Profile one-layer MPO distortion before choosing a compression policy."""
+
+    try:
+        parsed_bond_dims = tuple(int(value.strip()) for value in bond_dims.split(",") if value.strip())
+    except ValueError as exc:
+        raise typer.BadParameter("--bond-dims must be comma-separated integers") from exc
+    if not parsed_bond_dims or any(value < 1 for value in parsed_bond_dims):
+        raise typer.BadParameter("--bond-dims must contain positive integers")
+    if mpo_sites < 2:
+        raise typer.BadParameter("--mpo-sites must be >= 2")
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        low_cpu_mem_usage=True,
+        trust_remote_code=trust_remote_code,
+    ).eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=trust_remote_code)
+    vocab_size = getattr(tokenizer, "vocab_size", None) or getattr(model.config, "vocab_size", 32000)
+    batches = [
+        {"input_ids": torch.randint(0, int(vocab_size), (calibration_batch_size, calibration_sequence_length))}
+        for _ in range(calibration_batches)
+    ]
+    results = profile_mpo_sensitivity(
+        model,
+        batches,
+        bond_dims=parsed_bond_dims,
+        mpo_sites=mpo_sites,
+    )
+    write_sensitivity_profile(results, output)
+    typer.echo(json.dumps({"profile": output.as_posix(), "entries": len(results)}, indent=2))
 
 
 @app.command()
