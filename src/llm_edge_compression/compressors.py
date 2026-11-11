@@ -49,16 +49,33 @@ class TensorNetworkCompressor(BaseCompressor):
 
 
 class DynamicQuantizationCompressor(BaseCompressor):
+    def __init__(self, backend: str = "fbgemm") -> None:
+        supported_engines = torch.backends.quantized.supported_engines
+        if backend not in supported_engines:
+            raise ValueError(f"Unsupported quantization backend {backend!r}; choose from {supported_engines}")
+        self.backend = backend
+
     def compress(self, model: nn.Module) -> nn.Module:
-        return torch.ao.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
+        previous_backend = torch.backends.quantized.engine
+        torch.backends.quantized.engine = self.backend
+        try:
+            return torch.ao.quantization.quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
+        finally:
+            torch.backends.quantized.engine = previous_backend
 
 
 class MPOCompressor(BaseCompressor):
     """Compress Linear and GPT-2 Conv1D layers with a truncated MPO."""
 
-    def __init__(self, rank_ratio: float = 0.5, layer_policy: CompressionPolicy | None = None):
+    def __init__(
+        self,
+        rank_ratio: float = 0.5,
+        layer_policy: CompressionPolicy | None = None,
+        mpo_sites: int = 3,
+    ):
         self.rank_ratio = rank_ratio
         self.layer_policy = layer_policy or CompressionPolicy()
+        self.mpo_sites = mpo_sites
 
     def _rank_ratio_for(self, module_path: str) -> float:
         return self.rank_ratio
@@ -72,15 +89,49 @@ class MPOCompressor(BaseCompressor):
             child_path = f"{module_path}.{child_name}" if module_path else child_name
             if isinstance(child, nn.Linear):
                 if self._should_compress(child_path):
-                    setattr(module, child_name, MPOLinear.from_linear(child, self._rank_ratio_for(child_path), mpo_sites=3))
+                    setattr(
+                        module,
+                        child_name,
+                        MPOLinear.from_linear(child, self._rank_ratio_for(child_path), mpo_sites=self.mpo_sites),
+                    )
             elif Conv1D is not None and isinstance(child, Conv1D):
                 if self._should_compress(child_path):
-                    setattr(module, child_name, MPOLinear.from_conv1d(child, self._rank_ratio_for(child_path), mpo_sites=3))
+                    setattr(
+                        module,
+                        child_name,
+                        MPOLinear.from_conv1d(child, self._rank_ratio_for(child_path), mpo_sites=self.mpo_sites),
+                    )
             else:
                 self._compress_module(child, child_path)
 
     def _should_compress(self, module_path: str) -> bool:
         return not any(re.search(pattern, module_path) for pattern in self.layer_policy.skip_module_patterns)
+
+
+class MixedCompressionCompressor(BaseCompressor):
+    """Apply MPO to selected layers and dynamic int8 quantization to the rest.
+
+    The layer policy controls the split: MPO compresses layers that are not
+    skipped, and dynamic quantization handles skipped ``nn.Linear`` layers.
+    This is useful for protecting sensitive layers while still reducing the
+    size of layers such as a language-model head.
+    """
+
+    def __init__(
+        self,
+        rank_ratio: float = 0.5,
+        layer_policy: CompressionPolicy | None = None,
+        mpo_sites: int = 3,
+    ) -> None:
+        self.mpo_compressor = MPOCompressor(
+            rank_ratio=rank_ratio,
+            layer_policy=layer_policy,
+            mpo_sites=mpo_sites,
+        )
+
+    def compress(self, model: nn.Module) -> nn.Module:
+        model = self.mpo_compressor.compress(model)
+        return DynamicQuantizationCompressor().compress(model)
 
 
 class MPOLinear(nn.Module):

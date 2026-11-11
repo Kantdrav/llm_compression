@@ -161,6 +161,7 @@ class CompressionPipeline:
                     layer_policy=self.compression.layer_policy,
                     energy_threshold=self.compression.adaptive_energy_threshold,
                     target_reduction=self.compression.target_reduction,
+                    mpo_sites=self.compression.mpo_sites,
                 )
             from .compressors import MPOCompressor
             return MPOCompressor(rank_ratio=self.compression.rank_ratio, layer_policy=self.compression.layer_policy)

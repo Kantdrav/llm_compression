@@ -1,5 +1,11 @@
 """LLM compression and edge packaging helpers."""
 
+from .adaptive_mpo import (
+    AdaptiveLayerCompressionReport,
+    AdaptiveMPOCompressor,
+    AdaptiveMPOLinear,
+    compare_mpo_compressors,
+)
 from .compressors import MixedCompressionCompressor, TensorNetworkCompressor, TensorNetworkLinear
 from .config import CompressionConfig, CompressionPolicy, ExportConfig
 from .inference import chat_loop, generate_text, load_compressed_bundle
@@ -15,6 +21,10 @@ from .tn_model_compressor import (
 )
 
 __all__ = [
+	"AdaptiveLayerCompressionReport",
+	"AdaptiveMPOCompressor",
+	"AdaptiveMPOLinear",
+	"compare_mpo_compressors",
 	"CompressionConfig",
 	"CompressionPolicy",
 	"ExportConfig",

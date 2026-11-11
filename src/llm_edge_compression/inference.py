@@ -8,7 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from .paper_mpo import ResearchMPOCompressor
 from .adaptive_mpo import AdaptiveMPOCompressor
-from .compressors import DynamicQuantizationCompressor, MPOCompressor, TensorNetworkCompressor
+from .compressors import DynamicQuantizationCompressor, MixedCompressionCompressor, MPOCompressor, TensorNetworkCompressor
 from .config import CompressionConfig, compression_config_from_dict
 from .manifest import ModelManifest, read_manifest
 from .layer_pruner import LayerPruningCompressor
@@ -36,6 +36,13 @@ def _build_compressor(compression: CompressionConfig):
             backend=compression.quantization_backend
         )
 
+    if compression.method == "mixed":
+        return MixedCompressionCompressor(
+            rank_ratio=compression.rank_ratio,
+            layer_policy=compression.layer_policy,
+            mpo_sites=compression.mpo_sites,
+        )
+
     if compression.method == "paper_mpo":
         return ResearchMPOCompressor(
             bond_dim=compression.bond_dim,
@@ -50,6 +57,7 @@ def _build_compressor(compression: CompressionConfig):
                 layer_policy=compression.layer_policy,
                 energy_threshold=compression.adaptive_energy_threshold,
                 target_reduction=compression.target_reduction,
+                mpo_sites=compression.mpo_sites,
             )
 
         return MPOCompressor(
