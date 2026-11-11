@@ -7,6 +7,7 @@ This project is designed around three practical stages:
 1. Load a transformer model from Hugging Face or a local checkpoint.
 2. Compress it with one of the supported strategies:
    - dynamic quantization
+   - mixed MPO plus dynamic quantization
    - low-rank factorization
    - tensor-inspired compression baseline
 3. Export a self-contained edge bundle with a manifest, compressed weights, and deployment metadata.
@@ -27,13 +28,33 @@ The paper you shared is about a tensor-network style compression method. Reprodu
 
 ## What the compression report means
 
-The current pipeline does not compute task accuracy yet. It reports compression size metrics instead:
+The compression pipeline reports size metrics, and the repository includes a separate
+next-token accuracy evaluator for measuring quality on your own data:
 
 - `original_parameters`
 - `compressed_parameters`
 - `parameter_ratio` = `compressed_parameters / original_parameters`
 
-Use `parameter_ratio` as the quick health check for how much smaller the model became. If you want true accuracy, add an evaluation set after compression, such as perplexity on a validation corpus or a downstream benchmark.
+Use `parameter_ratio` as the quick health check for how much smaller the model became.
+For a quality comparison, create a JSONL file with one record per example:
+
+```json
+{"text": "The capital of France is Paris."}
+{"text": "Water freezes at zero degrees Celsius."}
+```
+
+Then evaluate the original and compressed models on the same next-token targets:
+
+```bash
+python examples/evaluate_compression_accuracy.py \
+   --bundle-dir artifacts/gpt2-low-rank \
+   --data evaluation.jsonl \
+   --output artifacts/gpt2-low-rank/accuracy_report.json
+```
+
+The report includes original accuracy, compressed accuracy, and the drop in
+percentage points and relative percent. This is a language-model regression
+metric, not a downstream task benchmark.
 
 ## Quick start
 
@@ -46,6 +67,25 @@ llm-edge-compression demo --output-dir artifacts/demo
 llm-edge-compression chat --bundle-dir artifacts/gpt2-low-rank
 ```
 
+For mixed compression, MPO is applied to eligible projection layers and the
+protected `nn.Linear` layers are dynamically quantized to int8. The default
+policy protects the first two transformer layers and `lm_head`:
+
+```bash
+llm-edge-compression compress \
+   --model-id distilbert/distilgpt2 \
+   --output-dir artifacts/distilgpt2-mixed \
+   --method mixed \
+   --rank-ratio 0.8 \
+   --mpo-sites 3
+```
+
+Load the resulting bundle with:
+
+```bash
+llm-edge-compression chat --bundle-dir artifacts/distilgpt2-mixed
+```
+
 To compress a remote Hugging Face model without uploading a ZIP, call the backend `POST /compress-remote` endpoint or use the Flutter web app's "Internet model" mode.
 
 If you deploy the Flutter web client separately, set `API_BASE_URL` at build time so the app points at your live backend.
@@ -53,6 +93,22 @@ If you deploy the Flutter web client separately, set `API_BASE_URL` at build tim
 The `demo` command uses a tiny local model, so it is the easiest way to verify the bundle/export flow before you point the pipeline at a full LLM checkpoint.
 
 To ask queries of a compressed model, point `chat` at the bundle directory that contains `manifest.json` and `compressed_model.pt`. The CLI reloads the original Hugging Face model, rebuilds the compressed layers using the stored compression settings, loads the compressed weights, and then opens an interactive prompt.
+
+Before choosing a paper-style MPO bond dimension, profile the sensitivity of
+each eligible layer. The profiler compresses one layer at a time at each
+requested bond dimension and writes a JSON profile with output distortion,
+parameter ratio, and serialized-size ratio:
+
+```bash
+llm-edge-compression profile \
+   --model-id distilbert/distilgpt2 \
+   --output artifacts/distilgpt2-sensitivity.json \
+   --bond-dims 4,8,16
+```
+
+Use the profile to protect sensitive layers or allocate larger bond dimensions
+to them. The profile is a measurement aid, not a quality guarantee; validate
+the selected policy with held-out next-token and downstream-task evaluation.
 
 Example session:
 
@@ -79,12 +135,28 @@ The repository includes GitHub Actions workflows for two deployment targets:
 
 - `Deploy Backend to Render` triggers a Render deploy hook for the FastAPI server.
 - `Deploy Flutter Web` builds `flutter_app` and deploys the web bundle to Vercel.
+- `Deploy Flutter Web to GitHub Pages` builds and publishes the Flutter web
+  interface as a static site. The compression and inference work still runs on
+  the FastAPI backend.
 
 Required secrets:
 
 - `RENDER_DEPLOY_HOOK_URL`
 - `VERCEL_TOKEN`
 - `API_BASE_URL`
+
+To use GitHub Pages, enable **Settings → Pages → Source: GitHub Actions** and
+define the `API_BASE_URL` repository secret as the public URL of the deployed
+FastAPI service. Also configure the backend's `CORS_ORIGINS` environment
+variable to include the Pages origin, for example:
+
+```text
+https://kantdrav.github.io
+```
+
+After pushing to `main`, the site will be available at
+`https://kantdrav.github.io/llm_compression/`. GitHub Pages hosts only the
+Flutter frontend; it does not execute Python, PyTorch, or FastAPI.
 
 
 ## Similarity-guided layer pruning
